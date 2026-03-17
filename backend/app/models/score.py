@@ -114,3 +114,26 @@ class RescoreRun(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
+
+
+class LocalContextToolCallAudit(Base):
+    __tablename__ = "local_context_tool_calls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_uuid = Column(String(36), nullable=False, index=True)
+    tool_name = Column(String(80), nullable=False, index=True)
+    model_id = Column(String(120), nullable=False)
+    actor_role = Column(String(64), nullable=False)
+    environment = Column(String(32), nullable=False)
+    request_source = Column(String(64), nullable=False)
+    session_id = Column(String(255))
+    user_id = Column(String(255))
+    input_hash = Column(String(64), nullable=False)
+    result_hash = Column(String(64), nullable=False)
+    latency_ms = Column(Float, nullable=False)
+    status = Column(String(24), nullable=False)
+    decision_rationale = Column(JSON, nullable=False)
+    error_message = Column(Text)
+    input_payload = Column(JSON, nullable=False)
+    output_payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

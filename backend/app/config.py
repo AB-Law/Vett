@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     practice_embedding_model: str = "text-embedding-3-small"
     practice_embedding_dim: int = 1536  # set to 1024 for nomic-embed-text / mxbai-embed-large
 
+    # Local-context tooling
+    local_context_environment: str = "dev"
+
     class Config:
         env_file = ".env"
         extra = "ignore"
