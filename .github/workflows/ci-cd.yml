@@ -1,0 +1,108 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  backend-ci:
+    name: Backend CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
+          python -m pip install --no-cache-dir pytest
+
+      - name: Run static compile check
+        run: python -m compileall -q app
+
+      - name: Run backend tests (if present)
+        shell: bash
+        run: |
+          if find . -type f \( -name "test_*.py" -o -name "*_test.py" \) | grep -q .; then
+            pytest
+          else
+            echo "No backend tests found. Skipping pytest."
+          fi
+
+  frontend-ci:
+    name: Frontend CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build frontend
+        run: npm run build
+
+  docker-cd:
+    name: CD - Build & publish images
+    needs:
+      - backend-ci
+      - frontend-ci
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/vett-backend:latest
+            ghcr.io/${{ github.repository_owner }}/vett-backend:${{ github.sha }}
+
+      - name: Build and publish frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/vett-frontend:latest
+            ghcr.io/${{ github.repository_owner }}/vett-frontend:${{ github.sha }}
