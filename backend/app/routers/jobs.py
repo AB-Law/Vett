@@ -66,6 +66,16 @@ class JobRescoreResponse(BaseModel):
 
 _RESCORE_WORKER_LOCK = threading.Lock()
 _RESCORE_WORKER_STARTED = False
+_RESCORE_WORKER_POLL_INTERVAL_SECONDS = 0.75
+
+
+def _log_excerpt(text: object, *, max_chars: int = 140) -> str:
+    if text is None:
+        return ""
+    value = re.sub(r"\s+", " ", str(text)).strip()
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars] + "..."
 
 
 def _normalise_rescore_source(value: Optional[str]) -> Optional[str]:
@@ -177,6 +187,7 @@ def _start_rescore_worker() -> None:
                 run_id: Optional[str] = None
                 db: Optional[Session] = None
                 try:
+                    logger.debug("Rescore worker polling for queued runs.")
                     db = SessionLocal()
                     queued_run = (
                         db.query(RescoreRun)
@@ -186,7 +197,7 @@ def _start_rescore_worker() -> None:
                     )
                     if queued_run is None:
                         db.close()
-                        time.sleep(0.75)
+                        time.sleep(_RESCORE_WORKER_POLL_INTERVAL_SECONDS)
                         continue
 
                     run_id = queued_run.id
@@ -194,6 +205,12 @@ def _start_rescore_worker() -> None:
                     queued_run.started_at = datetime.utcnow()
                     queued_run.message = "Rescoring started."
                     queued_run.updated_at = queued_run.started_at
+                    logger.info(
+                        "Dequeued rescore run %s (source=%s only_unscored=%s)",
+                        queued_run.id,
+                        queued_run.source,
+                        bool(queued_run.only_unscored),
+                    )
                     db.commit()
                 except Exception:
                     if db is not None:
@@ -205,7 +222,8 @@ def _start_rescore_worker() -> None:
                             completed_at=datetime.utcnow(),
                             message="Worker failed while starting this run.",
                         )
-                    time.sleep(0.75)
+                    logger.exception("Rescore worker failed to start run=%s", run_id)
+                    time.sleep(_RESCORE_WORKER_POLL_INTERVAL_SECONDS)
                     continue
                 finally:
                     if db is not None:
@@ -223,10 +241,19 @@ async def _process_rescore_run(run_id: str) -> None:
     try:
         run = db.query(RescoreRun).filter(RescoreRun.id == run_id).first()
         if run is None or run.status != "running":
+            logger.warning("Rescore run %s was not running at process start.", run_id)
             return
+
+        logger.info(
+            "Starting rescore run processing run_id=%s source=%s only_unscored=%s",
+            run_id,
+            run.source,
+            bool(run.only_unscored),
+        )
 
         cv = db.query(CV).order_by(CV.id.desc()).first()
         if not cv:
+            logger.warning("Rescore run %s failed: no CV uploaded.", run_id)
             run.status = "failed"
             run.completed_at = datetime.utcnow()
             run.message = "No CV uploaded. Please upload a CV first."
@@ -239,6 +266,12 @@ async def _process_rescore_run(run_id: str) -> None:
         run.total_jobs = len(jobs)
         run.message = f"Scoring {run.total_jobs} jobs..."
         run.updated_at = datetime.utcnow()
+        logger.info(
+            "Run %s discovered %s jobs to score (source=%s).",
+            run_id,
+            run.total_jobs,
+            run.source or "all",
+        )
         db.commit()
 
         failed_job_ids = _as_int_list(run.failed_job_ids)
@@ -250,6 +283,11 @@ async def _process_rescore_run(run_id: str) -> None:
                     failed_job_ids.append(job.id)
                     run.failed_count += 1
                 run.failed_job_ids = failed_job_ids
+                logger.warning(
+                    "Run %s skipped job %s due to missing description.",
+                    run_id,
+                    job.id,
+                )
                 run.message = (
                     f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
                     f"{run.scored_count} scored, {run.failed_count} failed."
@@ -259,6 +297,15 @@ async def _process_rescore_run(run_id: str) -> None:
                 continue
 
             try:
+                logger.debug(
+                    "Run %s scoring job %s (title=%r company=%r desc_len=%s preview=%r)",
+                    run_id,
+                    job.id,
+                    job.title,
+                    job.company,
+                    len(job.description or ""),
+                    _log_excerpt(job.description),
+                )
                 orchestrator_result = await execute_scoring_orchestrator(
                     db,
                     cv_id=cv.id,
@@ -271,7 +318,11 @@ async def _process_rescore_run(run_id: str) -> None:
                     idempotency_key=f"jobs:{run_id}:job:{job.id}",
                 )
             except Exception:
-                logger.exception("Score failed for job %s (run %s)", job.id, run_id)
+                logger.exception(
+                    "Score execution failed for job %s in run %s",
+                    job.id,
+                    run_id,
+                )
                 if job.id not in failed_job_ids:
                     failed_job_ids.append(job.id)
                     run.failed_count += 1
@@ -285,6 +336,15 @@ async def _process_rescore_run(run_id: str) -> None:
                 continue
 
             if orchestrator_result.status == "failed":
+                failure_reason = getattr(orchestrator_result, "failure_reason", None)
+                failed_step = getattr(orchestrator_result, "failed_step", None)
+                logger.warning(
+                    "Orchestrator failed for job %s in run %s. failed_step=%r failure=%r",
+                    job.id,
+                    run_id,
+                    failed_step,
+                    failure_reason,
+                )
                 if job.id not in failed_job_ids:
                     failed_job_ids.append(job.id)
                     run.failed_count += 1
@@ -297,7 +357,28 @@ async def _process_rescore_run(run_id: str) -> None:
                 db.commit()
                 continue
 
-            fit_score, matched_keywords, missing_keywords, gap_analysis, reason, _ = _result_score_fields(orchestrator_result.result)
+            if not isinstance(orchestrator_result.result, dict):
+                logger.error(
+                    "Orchestrator result payload not dict for run=%s job=%s type=%s",
+                    run_id,
+                    job.id,
+                    type(orchestrator_result.result).__name__,
+                )
+                if job.id not in failed_job_ids:
+                    failed_job_ids.append(job.id)
+                    run.failed_count += 1
+                run.failed_job_ids = failed_job_ids
+                run.message = (
+                    f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
+                    f"{run.scored_count} scored, {run.failed_count} failed."
+                )
+                run.updated_at = datetime.utcnow()
+                db.commit()
+                continue
+
+            fit_score, matched_keywords, missing_keywords, gap_analysis, reason, _ = _result_score_fields(
+                orchestrator_result.result
+            )
             job.fit_score = fit_score
             job.matched_keywords = matched_keywords
             job.missing_keywords = missing_keywords
@@ -306,6 +387,14 @@ async def _process_rescore_run(run_id: str) -> None:
             job.scored_at = datetime.utcnow()
 
             run.scored_count += 1
+            logger.debug(
+                "Run %s completed scoring job %s fit=%s matched=%s missing=%s",
+                run_id,
+                job.id,
+                fit_score,
+                len(matched_keywords),
+                len(missing_keywords),
+            )
             run.message = (
                 f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
                 f"{run.scored_count} scored, {run.failed_count} failed."
@@ -320,6 +409,13 @@ async def _process_rescore_run(run_id: str) -> None:
             f"{run.failed_count} failed."
         )
         run.updated_at = datetime.utcnow()
+        logger.info(
+            "Rescore run %s completed: scored=%s failed=%s total=%s",
+            run_id,
+            run.scored_count,
+            run.failed_count,
+            run.total_jobs,
+        )
         db.commit()
     except Exception:
         logger.exception("Unexpected failure while processing rescore run %s", run_id)

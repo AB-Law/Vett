@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 import uuid
 import re
@@ -40,6 +41,8 @@ from .llm import (
     generate_agent_score_plan,
     score_cv_against_jd,
 )
+
+logger = logging.getLogger(__name__)
 
 LIFECYCLE_STEPS = (
     AGENT_STATE_ROLE_ANALYSIS,
@@ -95,6 +98,8 @@ class OrchestratorResult:
     result: dict[str, Any]
     transitions: list[AgentRunTransition]
     artifacts: list[AgentRunArtifact]
+    failure_reason: str | None = None
+    failed_step: str | None = None
 
 
 def _coerce_text(value: Any) -> str:
@@ -434,10 +439,12 @@ async def _run_scoring_step(
 
         last_critic_feedback = critic_feedback
         if attempt >= SCORING_EXECUTOR_MAX_ATTEMPTS:
-            raise ValueError(
-                "Score payload failed critic validation: "
-                + "; ".join(critic_feedback)
+            logger.warning(
+                "Score payload did not fully satisfy critic after %s attempt(s); proceeding with best result. Issues: %s",
+                attempt,
+                "; ".join(critic_feedback),
             )
+            break
         critic_retries += 1
         scoring_plan = _reconcile_scoring_plan_with_feedback(scoring_plan, critic_feedback)
 
@@ -742,11 +749,20 @@ async def _run_pipeline_with_idempotent_steps(
             db.add(transition)
             db.add(run)
             db.commit()
+            logger.warning(
+                "Agent run %s failed at step=%s attempt=%s reason=%r",
+                run.id,
+                step,
+                attempt,
+                _coerce_text(exc),
+            )
 
             return OrchestratorResult(
                 run_id=run.id,
                 current_state=run.current_state,
                 status=run.status,
+                failure_reason=_coerce_text(exc),
+                failed_step=step,
                 result=_normalize_final_response(
                     run.id,
                     db,
@@ -785,6 +801,8 @@ async def _run_pipeline_with_idempotent_steps(
         run_id=run.id,
         current_state=run.current_state,
         status=run.status,
+        failure_reason=run.failure_reason,
+        failed_step=run.failed_step,
         result=_normalize_final_response(
             run.id,
             db,
@@ -855,6 +873,8 @@ async def execute_scoring_orchestrator(
             run_id=run.id,
             current_state=run.current_state,
             status=run.status,
+            failure_reason=_coerce_text(run.failure_reason),
+            failed_step=run.failed_step,
             result=_normalize_final_response(
                 run.id,
                 db,

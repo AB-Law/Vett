@@ -1,10 +1,13 @@
 """LiteLLM-backed LLM service with multi-provider support."""
+import logging
 import json
 import re
 from html import unescape
 from urllib.parse import urlparse
 from typing import Any
 from ..config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def _get_litellm_model() -> tuple[str, dict[str, Any]]:
@@ -126,70 +129,70 @@ Return ONLY valid JSON with this exact structure:
   "gap_analysis": "<2-4 sentence narrative>",
   "rewrite_suggestions": [<list of 3-5 specific suggestion strings>],
   "matched_keyword_evidence": [
-    {
+    {{
       "value": "<matched keyword>",
       "cv_citations": [
-        {
+        {{
           "section_id": "<stable section id>",
           "line_start": <1-based int>,
           "line_end": <1-based int>,
           "snippet": "<short 1-2 line snippet>"
-        }
+        }}
       ],
       "jd_phrase_citations": [
-        {
+        {{
           "phrase_id": "<stable jd phrase id>",
           "line_start": <1-based int>,
           "line_end": <1-based int>,
           "snippet": "<short 1-2 line snippet>"
-        }
+        }}
       ],
       "evidence_missing_reason": null | "<why evidence was not available>"
-    }
+    }}
   ],
   "missing_keyword_evidence": [
-    {
+    {{
       "value": "<missing keyword>",
       "cv_citations": [
-        {
+        {{
           "section_id": "<stable section id>",
           "line_start": <1-based int>,
           "line_end": <1-based int>,
           "snippet": "<short 1-2 line snippet>"
-        }
+        }}
       ],
       "jd_phrase_citations": [
-        {
+        {{
           "phrase_id": "<stable jd phrase id>",
           "line_start": <1-based int>,
           "line_end": <1-based int>,
           "snippet": "<short 1-2 line snippet>"
-        }
+        }}
       ],
       "evidence_missing_reason": "<required if evidence is not available>"
-    }
+    }}
   ],
   "rewrite_suggestion_evidence": [
-    {
+    {{
       "value": "<rewrite suggestion>",
       "cv_citations": [
-        {
+        {{
           "section_id": "<stable section id>",
           "line_start": <1-based int>,
           "line_end": <1-based int>,
           "snippet": "<short 1-2 line snippet>"
-        }
+        }}
       ],
       "jd_phrase_citations": [
-        {
+        {{
           "phrase_id": "<stable jd phrase id>",
           "line_start": <1-based int>,
           "line_end": <1-based int>,
           "snippet": "<short 1-2 line snippet>"
-        }
+        }}
       ],
       "evidence_missing_reason": null | "<why evidence was not available>"
-    }
+    }}
   ]
 }}
 
@@ -451,15 +454,30 @@ def _coerce_score_evidence_record(value: object, index: int) -> dict[str, Any] |
 def _coerce_score_evidence_rows(items: object, evidence_values: object, *, item_label: str) -> list[dict[str, Any]]:
     item_values = _coerce_string_list(items)
     raw_records: list[dict[str, Any]] = []
-    for index, raw_record in enumerate(_coerce_list_block(evidence_values)):
-        parsed = _coerce_score_evidence_record(raw_record, index)
+    evidence_list = evidence_values if isinstance(evidence_values, list) else []
+    for index, raw_record in enumerate(evidence_list):
+        try:
+            parsed = _coerce_score_evidence_record(raw_record, index)
+        except Exception:
+            logger.exception(
+                "Malformed %s evidence row at index=%s (raw=%r).",
+                item_label,
+                index,
+                raw_record,
+            )
+            parsed = None
         if parsed is not None:
             raw_records.append(parsed)
 
     records_by_value: dict[str, list[dict[str, Any]]] = {}
     for record in raw_records:
-        key = str(record["value"]).strip().lower()
+        key = _coerce_non_empty_string(record.get("value")).strip().lower()
         if not key:
+            logger.warning(
+                "Evidence row missing fallback value in %s evidence block, skipping row=%r",
+                item_label,
+                record,
+            )
             continue
         records_by_value.setdefault(key, []).append(record)
 
