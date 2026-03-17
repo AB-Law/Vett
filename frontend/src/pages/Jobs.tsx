@@ -14,7 +14,7 @@ import { getJobs, searchJobs, getRescoreStatus, rescoreJobs, type Job } from '..
 import { scoreColor, formatDate } from '../lib/utils'
 import toast from 'react-hot-toast'
 
-type JobSortField = 'title' | 'company' | 'location' | 'score' | 'source' | 'posted_at'
+type JobSortField = 'title' | 'company' | 'location' | 'score' | 'source' | 'posted_at' | 'created_at'
 
 export default function Jobs() {
   const [jobs, setJobs] = useState<Job[]>([])
@@ -415,6 +415,7 @@ export default function Jobs() {
                     if (h.key === null) {
                       return <th key={h.label} className="text-left px-4 py-3 text-text-muted font-medium text-xs uppercase tracking-wide" />
                     }
+                  const sortField = h.key
                     return (
                       <th
                         key={h.label}
@@ -422,12 +423,12 @@ export default function Jobs() {
                       >
                         <button
                           type="button"
-                          onClick={() => handleSort(h.key)}
+                          onClick={() => handleSort(sortField)}
                           className="inline-flex items-center gap-1 hover:text-text-primary"
                           title={`Sort by ${h.label}`}
                         >
                           {h.label}
-                          {sortBy === h.key &&
+                          {sortBy === sortField &&
                             (sortDirection === 'asc' ? (
                               <ChevronUp className="w-3.5 h-3.5" />
                             ) : (
