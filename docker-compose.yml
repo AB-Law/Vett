@@ -1,0 +1,85 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    env_file:
+      - .env
+    environment:
+      - UPLOAD_DIR=/data/uploads
+      - DATABASE_URL=${DATABASE_URL}
+      - ENV_FILE=/app/.env
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      - POSTGRES_DB=vett
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vett"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # Phase 2: Celery worker (scaffolded, disabled by default)
+  # celery_worker:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   command: celery -A app.celery_app worker --loglevel=info
+  #   volumes:
+  #     - ./backend:/app
+  #     - ./data:/data
+  #     - ./.env:/app/.env
+  #   environment:
+  #     - DATABASE_URL=sqlite:////data/vett.db
+  #     - CELERY_BROKER_URL=redis://redis:6379/0
+  #     - CELERY_RESULT_BACKEND=redis://redis:6379/0
+  #   depends_on:
+  #     - redis
+  #     - backend
+
+volumes:
+  redis_data:
+  postgres_data:

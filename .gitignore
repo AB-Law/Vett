@@ -1,0 +1,29 @@
+# Env
+.env
+!.env.example
+
+# Data
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+*.db
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+.idea/
+.vscode/
+.cursor/
