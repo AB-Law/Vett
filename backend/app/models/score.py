@@ -15,6 +15,7 @@ class ScoreHistory(Base):
     missing_keywords = Column(JSON)   # list of strings
     gap_analysis = Column(Text)
     rewrite_suggestions = Column(JSON)  # list of strings
+    agent_plan = Column(JSON)  # plan payload from second scoring pass
     llm_provider = Column(String(100))
     llm_model = Column(String(100))
     created_at = Column(DateTime(timezone=True), server_default=func.now())

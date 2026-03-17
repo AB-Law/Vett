@@ -131,14 +131,218 @@ CV:
 
 Job Description:
 {jd_text}
+
+Role/Signal map:
+{role_signal_map}
 """
 
 
-async def score_cv_against_jd(cv_text: str, jd_text: str) -> dict:
+ROLE_SIGNAL_MAP_PROMPT = """You are an extraction agent for career-role matching.
+
+Input:
+CV:
+{cv_text}
+
+Job description:
+{jd_text}
+
+Return ONLY valid JSON using this exact structure:
+{{
+  "role_summary": "<one-line summary of the likely target role>",
+  "role_tier": "<senior|mid|lead|principal|director|manager|unknown>",
+  "responsibilities": ["<important duty 1>", "<important duty 2>"],
+  "required_skills": ["<high-confidence required skill>", "..."],
+  "secondary_skills": ["<helpful but optional skill>", "..."],
+  "experience_signals": ["<years, domain, stack, delivery scale signals>", "..."],
+  "interview_focus": ["<topic likely to appear in interview>", "..."],
+  "evidence_snippets": ["<short JD signal 1>", "..."]
+}}
+
+Keep each list to ~2-5 high-value entries.
+"""
+
+
+AGENT_PLAN_PROMPT = """You are a career agent that converts a scoring result into an action plan.
+
+Input:
+Role/Signal map:
+{role_signal_map}
+
+Score result:
+{score_payload}
+
+CV:
+{cv_text}
+
+Job description:
+{jd_text}
+
+Return ONLY valid JSON using this exact structure:
+{{
+  "role_signal_map": {{}},
+  "skills_to_fix_first": ["<most important skill to improve>", "..."],
+  "concrete_edit_actions": ["<specific change to CV or prep>", "..."],
+  "interview_topics_to_prioritize": ["<topic name>", "..."],
+  "study_order": ["<order of study for next 1-2 weeks>", "..."]
+}}
+
+Rules:
+- Skills must be ordered by priority (earliest item highest priority).
+- Interview topics should be distinct and role-relevant.
+- Provide study order as an explicit sequence, not generic labels.
+- Keep every list actionable and concrete.
+"""
+
+
+def _coerce_signal_map(value: object) -> dict[str, str | list[str]]:
+    """Normalise role map structure to safe, JSON-serializable values."""
+    if not isinstance(value, dict):
+        return {}
+
+    output: dict[str, str | list[str]] = {}
+    for raw_key, raw_value in value.items():
+        safe_key = str(raw_key).strip()
+        if not safe_key:
+            continue
+        if isinstance(raw_value, list):
+            values = _coerce_string_list(raw_value)
+            if values:
+                output[safe_key] = values
+            continue
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if text:
+                output[safe_key] = text
+            continue
+        if raw_value is None:
+            continue
+        output[safe_key] = str(raw_value).strip()
+    return output
+
+
+def _coerce_list_block(value: object) -> list[str]:
+    """Coerce to a bounded list of actionable bullets."""
+    return _coerce_string_list(value)[:8]
+
+
+def _coerce_score_payload(score_payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact payload for downstream prompts."""
+    return {
+        "fit_score": score_payload.get("fit_score"),
+        "matched_keywords": _coerce_list_block(score_payload.get("matched_keywords")),
+        "missing_keywords": _coerce_list_block(score_payload.get("missing_keywords")),
+        "gap_analysis": _coerce_non_empty_string(score_payload.get("gap_analysis")) or "",
+        "rewrite_suggestions": _coerce_list_block(score_payload.get("rewrite_suggestions")),
+    }
+
+
+def _coerce_agent_plan_payload(
+    value: object,
+    fallback_role_signal_map: dict[str, Any],
+) -> dict[str, object]:
+    """Build a complete agent-plan payload and enforce output shape."""
+    if not isinstance(value, dict):
+        return {
+            "role_signal_map": fallback_role_signal_map,
+            "skills_to_fix_first": [],
+            "concrete_edit_actions": [],
+            "interview_topics_to_prioritize": [],
+            "study_order": [],
+        }
+
+    role_signal_map = _coerce_signal_map(
+        value.get("role_signal_map")
+        or value.get("role_map")
+        or value.get("role_signal")
+        or fallback_role_signal_map
+    )
+
+    skills_to_fix_first = _coerce_list_block(
+        value.get("skills_to_fix_first")
+        or value.get("priority_skills")
+        or value.get("priority_skill_gaps")
+        or value.get("skills_to_improve_first")
+    )
+    interview_topics = _coerce_list_block(
+        value.get("interview_topics_to_prioritize")
+        or value.get("interview_topics")
+        or value.get("interview_focus")
+    )
+    study_order = _coerce_list_block(value.get("study_order") or value.get("study_path") or value.get("learning_order"))
+    concrete_edit_actions = _coerce_list_block(
+        value.get("concrete_edit_actions")
+        or value.get("concrete_actions")
+        or value.get("edit_actions")
+    )
+
+    return {
+        "role_signal_map": role_signal_map,
+        "skills_to_fix_first": skills_to_fix_first,
+        "concrete_edit_actions": concrete_edit_actions,
+        "interview_topics_to_prioritize": interview_topics,
+        "study_order": study_order,
+    }
+
+
+async def extract_role_signal_map(cv_text: str, jd_text: str) -> dict[str, str | list[str]]:
+    """Extract role and signal metadata for downstream scoring and planning."""
     import litellm
 
     model, kwargs = _get_litellm_model()
-    prompt = SCORE_PROMPT.format(cv_text=cv_text[:6000], jd_text=jd_text[:4000])
+    prompt = ROLE_SIGNAL_MAP_PROMPT.format(
+        cv_text=cv_text[:6000],
+        jd_text=jd_text[:4000],
+    )
+
+    response = await litellm.acompletion(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=1200,
+        **kwargs,
+    )
+    raw = response.choices[0].message.content.strip()
+    match = _extract_first_json_object(raw)
+    if match:
+        raw = match
+
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        try:
+            parsed = json.loads(_sanitize_json_token_stream(raw))
+        except Exception:
+            parsed = {}
+
+    return _coerce_signal_map(
+        parsed
+        if isinstance(parsed, dict)
+        else {
+            "role_summary": "Unable to parse role/signal map output.",
+            "role_tier": "unknown",
+        }
+    )
+
+
+async def score_cv_against_jd(
+    cv_text: str,
+    jd_text: str,
+    role_signal_map: dict[str, Any] | None = None,
+) -> dict:
+    import litellm
+
+    model, kwargs = _get_litellm_model()
+    safe_role_signal_map = _coerce_signal_map(role_signal_map)
+    role_signal_text = (
+        json.dumps(safe_role_signal_map, ensure_ascii=False)
+        if safe_role_signal_map
+        else "No structured role/signal map available."
+    )
+    prompt = SCORE_PROMPT.format(
+        cv_text=cv_text[:6000],
+        jd_text=jd_text[:4000],
+        role_signal_map=role_signal_text,
+    )
 
     response = await litellm.acompletion(
         model=model,
@@ -164,6 +368,50 @@ async def score_cv_against_jd(cv_text: str, jd_text: str) -> dict:
     data["rewrite_suggestions"] = data.get("rewrite_suggestions") or []
 
     return data
+
+
+async def generate_agent_score_plan(
+    cv_text: str,
+    jd_text: str,
+    score_payload: dict[str, Any],
+    role_signal_map: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Generate a second-pass local plan for skill improvements and interview prep."""
+    import litellm
+
+    model, kwargs = _get_litellm_model()
+    safe_map = _coerce_signal_map(role_signal_map)
+    map_text = json.dumps(safe_map, ensure_ascii=False) if safe_map else "No role/signal map available."
+    score_text = json.dumps(_coerce_score_payload(score_payload), ensure_ascii=False)
+
+    response = await litellm.acompletion(
+        model=model,
+        messages=[{"role": "user", "content": AGENT_PLAN_PROMPT.format(
+            cv_text=cv_text[:6000],
+            jd_text=jd_text[:4000],
+            role_signal_map=map_text,
+            score_payload=score_text,
+        )}],
+        temperature=0.25,
+        max_tokens=1200,
+        **kwargs,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    match = _extract_first_json_object(raw)
+    if match:
+        raw = match
+
+    parsed: object
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        try:
+            parsed = json.loads(_sanitize_json_token_stream(raw))
+        except Exception:
+            parsed = {}
+
+    return _coerce_agent_plan_payload(parsed, safe_map)
 
 
 async def test_connection() -> dict:

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, BookOpen, CheckCircle2, ExternalLink, Loader2, XCircle } from 'lucide-react'
+import { ArrowLeft, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import {
@@ -30,6 +30,25 @@ const difficultyTagClass = (difficulty: string): string => {
   if (normalized.includes('easy')) return 'bg-sage-100 text-sage-700 border border-sage-200'
   if (normalized.includes('hard')) return 'bg-red-50 text-red-700 border border-red-200'
   return 'bg-amber-100 text-amber-700 border border-amber-200'
+}
+
+const buildCoachUrl = (
+  question: PracticeQuestion,
+  sessionId: string,
+  jobId: number,
+  coachLanguage: string,
+): string => {
+  const params = new URLSearchParams({
+    questionId: String(question.id),
+    sessionId,
+    title: question.title,
+    difficulty: question.difficulty || 'unknown',
+    language: coachLanguage,
+    prompt: question.prompt || '',
+    url: question.url || '',
+    jobId: String(jobId),
+  })
+  return `/practice/coach?${params.toString()}`
 }
 
 export default function JobDetails() {
@@ -506,6 +525,13 @@ export default function JobDetails() {
                                   ? 'Generating twist…'
                                   : 'Mark solved'}
                             </button>
+                            <Link
+                              to={buildCoachUrl(question, sessionId, job?.id || 0, constraints.language)}
+                              className="rounded border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 px-2 py-1 text-[11px]"
+                            >
+                              <MessageCircle className="inline w-3 h-3 mr-1 align-text-bottom" />
+                              Coach this question
+                            </Link>
                             {question.is_solved ? (
                               <button
                                 type="button"

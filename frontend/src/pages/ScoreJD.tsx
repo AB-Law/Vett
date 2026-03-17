@@ -224,6 +224,56 @@ function ResultPanel({
         </div>
       )}
 
+      {/* Agent Plan */}
+      {result.agent_plan && (
+        <div className="card p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <BookOpen className="w-4 h-4 text-text-secondary" />
+            <span className="text-sm font-semibold text-text-primary">Agentic Upgrade Plan</span>
+          </div>
+          {result.agent_plan.skills_to_fix_first.length > 0 && (
+            <div className="mb-3">
+              <h3 className="text-xs font-semibold text-text-primary mb-1">Skills to fix first</h3>
+              <ol className="list-decimal list-inside text-sm text-text-secondary space-y-1">
+                {result.agent_plan.skills_to_fix_first.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+          {result.agent_plan.interview_topics_to_prioritize.length > 0 && (
+            <div className="mb-3">
+              <h3 className="text-xs font-semibold text-text-primary mb-1">Interview topics to prioritize</h3>
+              <ul className="list-disc list-inside text-sm text-text-secondary space-y-1">
+                {result.agent_plan.interview_topics_to_prioritize.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {result.agent_plan.study_order.length > 0 && (
+            <div className="mb-3">
+              <h3 className="text-xs font-semibold text-text-primary mb-1">Study order</h3>
+              <ol className="list-decimal list-inside text-sm text-text-secondary space-y-1">
+                {result.agent_plan.study_order.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+          {result.agent_plan.concrete_edit_actions.length > 0 && (
+            <div>
+              <h3 className="text-xs font-semibold text-text-primary mb-1">Concrete edit actions</h3>
+              <ul className="list-disc list-inside text-sm text-text-secondary space-y-1">
+                {result.agent_plan.concrete_edit_actions.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Rewrite Suggestions */}
       {result.rewrite_suggestions.length > 0 && (
         <div className="card p-4">

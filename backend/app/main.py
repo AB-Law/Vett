@@ -63,6 +63,25 @@ def _ensure_jobs_columns() -> None:
             connection.execute(text('CREATE INDEX IF NOT EXISTS "ix_jobs_canonical_url" ON "jobs" ("canonical_url");'))
 
 
+def _ensure_score_history_columns() -> None:
+    """Add missing score history columns for schema upgrades."""
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "score_history" not in table_names:
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("score_history")}
+    expected_columns = OrderedDict([("agent_plan", "JSON")])
+
+    with engine.begin() as connection:
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing_columns:
+                continue
+            connection.execute(
+                text(f'ALTER TABLE "score_history" ADD COLUMN "{column_name}" {column_type};')
+            )
+
+
 def _ensure_pgvector_extension(connection: object) -> None:
     from sqlalchemy import text as sa_text
     connection.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector;"))
@@ -124,6 +143,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _migrate_practice_schema_if_needed()
             Base.metadata.create_all(bind=engine)
             _ensure_jobs_columns()
+            _ensure_score_history_columns()
             _ensure_practice_questions_columns()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")

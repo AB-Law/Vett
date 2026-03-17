@@ -6,6 +6,7 @@ import ScoreJD from './pages/ScoreJD'
 import Jobs from './pages/Jobs'
 import JobDetails from './pages/JobDetails'
 import Settings from './pages/Settings'
+import SolvePractice from './pages/SolvePractice'
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="score" element={<ScoreJD />} />
         <Route path="jobs" element={<Jobs />} />
         <Route path="jobs/:id" element={<JobDetails />} />
+        <Route path="practice/coach" element={<SolvePractice />} />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>

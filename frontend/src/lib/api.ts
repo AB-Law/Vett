@@ -51,10 +51,19 @@ export interface ScoreResult {
   missing_keywords: string[]
   gap_analysis: string
   rewrite_suggestions: string[]
+  agent_plan?: ScoreAgentPlan
   job_title?: string
   company?: string
   llm_provider?: string
   llm_model?: string
+}
+
+export interface ScoreAgentPlan {
+  role_signal_map: Record<string, string | string[]>
+  skills_to_fix_first: string[]
+  concrete_edit_actions: string[]
+  interview_topics_to_prioritize: string[]
+  study_order: string[]
 }
 
 export interface ScoreRequest {
@@ -336,103 +345,6 @@ export interface PracticeInterviewChatResponse {
   interviewer_reply: string
 }
 
-export interface PracticeSolutionReviewRequest {
-  session_id: string
-  question_id: number
-  solution_text: string
-  language?: string | null
-  followup_difficulty_delta?: number | null
-}
-
-export interface PracticeSolutionReviewResponse {
-  session_id: string
-  question_id: number
-  review_summary: string
-  strengths: string[]
-  concerns: string[]
-  follow_up_prompt: string
-  follow_up_reason: string
-}
-
-export interface PracticeTestCaseItem {
-  name: string
-  input: string
-  expected_output: string
-  rationale?: string | null
-}
-
-export interface PracticeTestCaseRequest {
-  session_id: string
-  question_id: number
-  language?: string | null
-  count?: number
-}
-
-export interface PracticeTestCaseResponse {
-  session_id: string
-  question_id: number
-  language: string
-  test_cases: PracticeTestCaseItem[]
-  llm_provider?: string
-  llm_model?: string
-}
-
-export interface PracticeSolutionTemplateRequest {
-  session_id: string
-  question_id: number
-  language?: string | null
-  question_prompt?: string | null
-}
-
-export interface PracticeSolutionTemplateResponse {
-  session_id: string
-  question_id: number
-  language: string
-  template: string
-  problem_prompt?: string | null
-  signature?: string | null
-  notes?: string | null
-  llm_provider?: string
-  llm_model?: string
-}
-
-export interface PracticeRunCaseResult {
-  name: string
-  input: string
-  expected_output: string
-  actual_output?: string | null
-  passed?: boolean | null
-  error?: string | null
-}
-
-export interface PracticeRunRequest {
-  session_id: string
-  question_id: number
-  code: string
-  language?: string | null
-  tests: PracticeRunCaseItem[]
-}
-
-export interface PracticeRunCaseItem {
-  name: string
-  input: string
-  expected_output: string
-  rationale?: string | null
-}
-
-export interface PracticeRunResponse {
-  session_id: string
-  question_id: number
-  status: string
-  summary: string
-  passed: number
-  total: number
-  results: PracticeRunCaseResult[]
-  output: string[]
-  llm_provider?: string
-  llm_model?: string
-}
-
 export interface ConstraintMetadata {
   difficulty_delta?: number | null
   language?: string | null
@@ -505,28 +417,6 @@ export const getPracticeNextQuestion = async (payload: PracticeNextRequest): Pro
 
 export const askPracticeInterviewer = async (payload: PracticeInterviewChatRequest): Promise<PracticeInterviewChatResponse> => {
   const { data } = await api.post<PracticeInterviewChatResponse>('/practice/interview-chat', payload)
-  return data
-}
-
-export const reviewPracticeSolution = async (payload: PracticeSolutionReviewRequest): Promise<PracticeSolutionReviewResponse> => {
-  const { data } = await api.post<PracticeSolutionReviewResponse>('/practice/review-solution', payload)
-  return data
-}
-
-export const generatePracticeTestCases = async (payload: PracticeTestCaseRequest): Promise<PracticeTestCaseResponse> => {
-  const { data } = await api.post<PracticeTestCaseResponse>('/practice/test-cases', payload)
-  return data
-}
-
-export const generatePracticeSolutionTemplate = async (
-  payload: PracticeSolutionTemplateRequest,
-): Promise<PracticeSolutionTemplateResponse> => {
-  const { data } = await api.post<PracticeSolutionTemplateResponse>('/practice/solution-template', payload)
-  return data
-}
-
-export const runPracticeCode = async (payload: PracticeRunRequest): Promise<PracticeRunResponse> => {
-  const { data } = await api.post<PracticeRunResponse>('/practice/run', payload)
   return data
 }
 

@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Any, Optional
 
 from ..database import get_db
 from ..models.cv import CV
 from ..models.score import ScoreHistory
-from ..services.llm import score_cv_against_jd
+from ..services.llm import extract_role_signal_map, generate_agent_score_plan, score_cv_against_jd
 from ..config import get_settings
 
 router = APIRouter(prefix="/score", tags=["score"])
@@ -16,6 +16,16 @@ class ScoreRequest(BaseModel):
     job_description: str
     job_title: Optional[str] = None
     company: Optional[str] = None
+
+
+class AgentPlan(BaseModel):
+    """Structured follow-up plan created by the second local scoring pass."""
+
+    role_signal_map: dict[str, Any] = Field(default_factory=dict)
+    skills_to_fix_first: list[str] = Field(default_factory=list)
+    concrete_edit_actions: list[str] = Field(default_factory=list)
+    interview_topics_to_prioritize: list[str] = Field(default_factory=list)
+    study_order: list[str] = Field(default_factory=list)
 
 
 class ScoreResponse(BaseModel):
@@ -29,6 +39,7 @@ class ScoreResponse(BaseModel):
     company: Optional[str] = None
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
+    agent_plan: Optional[AgentPlan] = None
 
 
 class HistoryItem(BaseModel):
@@ -36,6 +47,7 @@ class HistoryItem(BaseModel):
     job_title: Optional[str]
     company: Optional[str]
     fit_score: float
+    agent_plan: Optional[dict[str, Any]] = None
     matched_keywords: list[str]
     missing_keywords: list[str]
     gap_analysis: Optional[str]
@@ -48,13 +60,68 @@ class HistoryItem(BaseModel):
         from_attributes = True
 
 
+def _fallback_agent_plan(
+    role_signal_map: dict[str, Any] | None,
+    score_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a deterministic fallback plan from scoring artifacts."""
+    safe_map = role_signal_map or {}
+    missing = score_result.get("missing_keywords", [])
+    gaps = missing if isinstance(missing, list) else []
+
+    return {
+        "role_signal_map": _coerce_object_map(safe_map),
+        "skills_to_fix_first": _coerce_string_items(gaps)[:6],
+        "concrete_edit_actions": [
+            "Use one of the top 3 missing keywords in the professional summary.",
+            "Add one quantified result for recent work aligned to missing requirements.",
+            "Add one project bullet that demonstrates the strongest missing skill.",
+        ],
+        "interview_topics_to_prioritize": _coerce_string_items(score_result.get("missing_keywords"))[:6],
+        "study_order": [
+            "Identify the top 3 missing keywords",
+            "Draft one STAR proof point per missing skill",
+            "Run one mock interview with those topics in sequence",
+        ],
+    }
+
+
+def _coerce_string_items(values: Any) -> list[str]:
+    if isinstance(values, list):
+        return [str(item).strip() for item in values if str(item).strip()]
+    if isinstance(values, str):
+        return [values.strip()] if values.strip() else []
+    return []
+
+
+def _coerce_object_map(values: Any) -> dict[str, Any]:
+    if isinstance(values, dict):
+        return {str(k): v for k, v in values.items() if str(k).strip()}
+    return {}
+
+
 @router.post("/", response_model=ScoreResponse)
 async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
     cv = db.query(CV).order_by(CV.id.desc()).first()
     if not cv:
         raise HTTPException(400, "No CV uploaded. Please upload a CV first.")
 
-    result = await score_cv_against_jd(cv.parsed_text, req.job_description)
+    try:
+        role_signal_map = await extract_role_signal_map(cv.parsed_text, req.job_description)
+    except Exception:
+        role_signal_map = {}
+    result = await score_cv_against_jd(cv.parsed_text, req.job_description, role_signal_map=role_signal_map)
+    try:
+        agent_plan = await generate_agent_score_plan(
+            cv_text=cv.parsed_text,
+            jd_text=req.job_description,
+            score_payload=result,
+            role_signal_map=role_signal_map,
+        )
+    except Exception:
+        agent_plan = _fallback_agent_plan(role_signal_map, result)
+
+    result["agent_plan"] = agent_plan
 
     settings = get_settings()
 
@@ -69,6 +136,7 @@ async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
             missing_keywords=result["missing_keywords"],
             gap_analysis=result["gap_analysis"],
             rewrite_suggestions=result["rewrite_suggestions"],
+            agent_plan=result.get("agent_plan"),
             llm_provider=settings.active_llm_provider,
             llm_model=_current_model(settings),
         )
@@ -99,6 +167,7 @@ def get_history(db: Session = Depends(get_db)):
             job_title=i.job_title,
             company=i.company,
             fit_score=i.fit_score,
+            agent_plan=i.agent_plan,
             matched_keywords=i.matched_keywords or [],
             missing_keywords=i.missing_keywords or [],
             gap_analysis=i.gap_analysis,
