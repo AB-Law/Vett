@@ -1,0 +1,30 @@
+# Core
+fastapi==0.135.1
+uvicorn[standard]==0.42.0
+python-multipart==0.0.22
+sqlalchemy==2.0.48
+pydantic==2.12.5
+pydantic-settings==2.13.1
+python-dotenv==1.2.2
+
+# CV parsing
+pypdf2==3.0.1
+pdfplumber==0.11.5
+pymupdf==1.25.5
+python-docx==1.2.0
+markdown==3.10.2
+psycopg2-binary==2.9.10
+pgvector==0.3.6
+
+# LLM
+litellm==1.82.2
+httpx==0.28.1
+
+# Phase 2 (scaffolded — comment out if causing issues)
+celery==5.6.2
+redis==7.3.0
+apify-client==1.8.1
+apify-shared<2
+
+# Utilities
+aiofiles==25.1.0

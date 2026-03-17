@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-canvas text-text-primary font-sans antialiased;
+    margin: 0;
+  }
+
+  h1, h2, h3 {
+    @apply font-serif;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-sage-600 hover:bg-sage-700 text-white font-medium px-4 py-2 rounded transition-colors text-sm;
+  }
+
+  .btn-secondary {
+    @apply bg-white hover:bg-gray-50 text-text-primary font-medium px-4 py-2 rounded border border-border transition-colors text-sm;
+  }
+
+  .btn-danger {
+    @apply bg-red-50 hover:bg-red-100 text-red-700 font-medium px-4 py-2 rounded border border-red-200 transition-colors text-sm;
+  }
+
+  .card {
+    @apply bg-card rounded-lg border border-border shadow-card;
+  }
+
+  .input {
+    @apply w-full bg-white border border-border rounded px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-sage-300 focus:border-sage-400 transition;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-text-secondary mb-1;
+  }
+
+  .section-title {
+    @apply text-base font-semibold text-text-primary;
+  }
+
+  .keyword-matched {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-sage-100 text-sage-800 border border-sage-200;
+  }
+
+  .keyword-missing {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200;
+  }
+
+  .score-badge-green {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-sage-100 text-sage-800;
+  }
+
+  .score-badge-amber {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700;
+  }
+
+  .score-badge-red {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700;
+  }
+}

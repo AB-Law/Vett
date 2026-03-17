@@ -1,0 +1,3 @@
+# Phase 2 extras — install in celery_worker only
+-r requirements.txt
+playwright==1.49.0
