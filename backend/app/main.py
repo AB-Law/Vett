@@ -8,7 +8,7 @@ from collections import OrderedDict
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 
-from .database import Base, engine
+from .database import Base, SessionLocal, engine
 from .models import cv, score, practice  # noqa: F401 – register models
 from .routers import cv as cv_router
 from .routers import score as score_router
@@ -82,6 +82,167 @@ def _ensure_score_history_columns() -> None:
             )
 
 
+def _backfill_agent_runs_from_score_history() -> None:
+    from .models.score import (
+        AGENT_STATE_ACTION_PLAN,
+        AGENT_STATE_COMPLETED,
+        AGENT_STATE_REWRITE_PLAN,
+        AGENT_STATE_SCORING,
+        ScoreHistory,
+        AgentRun,
+        AgentRunArtifact,
+        AgentRunTransition,
+    )
+
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(engine)
+    tables = set(inspector.get_table_names())
+    if not {"score_history", "agent_runs", "agent_run_artifacts", "agent_run_transitions"}.issubset(tables):
+        return
+
+    with SessionLocal() as db:
+        existing_score_history_ids = {
+            row[0]
+            for row in db.query(AgentRun.score_history_id).filter(
+                AgentRun.score_history_id.is_not(None),
+            ).all()
+            if row[0] is not None
+        }
+        query = db.query(ScoreHistory)
+        if existing_score_history_ids:
+            query = query.filter(~ScoreHistory.id.in_(existing_score_history_ids))
+        score_history_rows = query.order_by(ScoreHistory.id.asc()).all()
+        for row in score_history_rows:
+            run = AgentRun(
+                id=f"bh-{row.id}",
+                score_history_id=row.id,
+                current_state=AGENT_STATE_COMPLETED,
+                status=AGENT_STATE_COMPLETED,
+                actor="system",
+                source="backfill",
+                request_payload={
+                    "cv_id": None,
+                    "job_title": row.job_title or "",
+                    "company": row.company or "",
+                    "job_description": row.job_description or "",
+                },
+                attempt_count=1,
+            )
+            db.add(run)
+            db.flush()
+
+            if row.fit_score is not None:
+                scoring_payload = {
+                    "fit_score": row.fit_score,
+                    "matched_keywords": row.matched_keywords or [],
+                    "missing_keywords": row.missing_keywords or [],
+                    "gap_analysis": row.gap_analysis or "",
+                    "rewrite_suggestions": row.rewrite_suggestions or [],
+                }
+                run_transition = AgentRunTransition(
+                    run_id=run.id,
+                    score_history_id=row.id,
+                    previous_state=AGENT_STATE_COMPLETED,
+                    next_state=AGENT_STATE_SCORING,
+                    trigger="backfill",
+                    attempt=1,
+                    idempotency_key=f"backfill-score-history-{row.id}",
+                    actor="system",
+                    source="backfill",
+                )
+                db.add(run_transition)
+                db.flush()
+                db.add(
+                    AgentRunArtifact(
+                        run_id=run.id,
+                        score_history_id=row.id,
+                        step=AGENT_STATE_SCORING,
+                        actor="system",
+                        source="backfill",
+                        payload=scoring_payload,
+                        evidence={"source": "backfill"},
+                        attempt=1,
+                        transition_id=run_transition.id,
+                    ),
+                )
+
+            if row.agent_plan:
+                action_plan_payload = row.agent_plan if isinstance(row.agent_plan, dict) else {}
+                db.add(
+                    AgentRunTransition(
+                        run_id=run.id,
+                        score_history_id=row.id,
+                        previous_state=AGENT_STATE_SCORING,
+                        next_state=AGENT_STATE_ACTION_PLAN,
+                        trigger="backfill",
+                        attempt=1,
+                        idempotency_key=f"backfill-score-history-plan-{row.id}",
+                        actor="system",
+                        source="backfill",
+                    ),
+                )
+                db.flush()
+                db.add(
+                    AgentRunArtifact(
+                        run_id=run.id,
+                        score_history_id=row.id,
+                        step=AGENT_STATE_ACTION_PLAN,
+                        actor="system",
+                        source="backfill",
+                        payload=action_plan_payload,
+                        evidence={"source": "backfill"},
+                        attempt=1,
+                    ),
+                )
+
+            if row.rewrite_suggestions:
+                db.add(
+                    AgentRunTransition(
+                        run_id=run.id,
+                        score_history_id=row.id,
+                        previous_state=AGENT_STATE_ACTION_PLAN,
+                        next_state=AGENT_STATE_REWRITE_PLAN,
+                        trigger="backfill",
+                        attempt=1,
+                        idempotency_key=f"backfill-score-history-rewrite-{row.id}",
+                        actor="system",
+                        source="backfill",
+                    ),
+                )
+                db.flush()
+                db.add(
+                    AgentRunArtifact(
+                        run_id=run.id,
+                        score_history_id=row.id,
+                        step=AGENT_STATE_REWRITE_PLAN,
+                        actor="system",
+                        source="backfill",
+                        payload={"rewrite_suggestions": row.rewrite_suggestions or []},
+                        evidence={"source": "backfill"},
+                        attempt=1,
+                    ),
+                )
+
+            db.add(
+                AgentRunTransition(
+                    run_id=run.id,
+                    score_history_id=row.id,
+                    previous_state=AGENT_STATE_SCORING if row.agent_plan else AGENT_STATE_COMPLETED,
+                    next_state=AGENT_STATE_COMPLETED,
+                    trigger="backfill-complete",
+                    attempt=1,
+                    idempotency_key=f"backfill-complete-{row.id}",
+                    actor="system",
+                    source="backfill",
+                )
+            )
+            run.completed_at = row.created_at
+            db.add(run)
+        if score_history_rows:
+            db.commit()
+
+
 def _ensure_pgvector_extension(connection: object) -> None:
     from sqlalchemy import text as sa_text
     connection.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector;"))
@@ -144,6 +305,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             Base.metadata.create_all(bind=engine)
             _ensure_jobs_columns()
             _ensure_score_history_columns()
+            _backfill_agent_runs_from_score_history()
             _ensure_practice_questions_columns()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")

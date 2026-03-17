@@ -23,6 +23,7 @@ export default function ScoreJD() {
   const [result, setResult] = useState<ScoreResult | null>(null)
   const [suggestionsOpen, setSuggestionsOpen] = useState(true)
   const [savedId, setSavedId] = useState<number | null>(null)
+  const [showTimeline, setShowTimeline] = useState(true)
 
   const handleScore = async () => {
     if (!jd.trim()) {
@@ -128,7 +129,10 @@ export default function ScoreJD() {
         {/* Right – Results */}
         <div className="w-[380px] shrink-0">
           {result ? (
-            <ResultPanel result={result} savedId={savedId} suggestionsOpen={suggestionsOpen} setSuggestionsOpen={setSuggestionsOpen} />
+            <>
+              <ResultPanel result={result} savedId={savedId} suggestionsOpen={suggestionsOpen} setSuggestionsOpen={setSuggestionsOpen} />
+              <RunTimelinePanel result={result} isOpen={showTimeline} onToggle={() => setShowTimeline((prev) => !prev)} />
+            </>
           ) : (
             <div className="card flex flex-col items-center justify-center py-20 text-center px-8">
               <div className="w-12 h-12 rounded-full bg-sage-50 flex items-center justify-center mb-4">
@@ -313,6 +317,85 @@ function ResultPanel({
           <p className="text-xs text-amber-700">
             Low confidence result. Make sure your CV is loaded and the LLM provider is configured correctly.
           </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RunTimelinePanel({
+  result,
+  isOpen,
+  onToggle,
+}: {
+  result: ScoreResult
+  isOpen: boolean
+  onToggle: () => void
+}) {
+  if (!result.run) return null
+
+  const transitions = result.run_transitions || []
+  const artifacts = result.run_artifacts || []
+
+  return (
+    <div className="card p-4">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between text-sm font-semibold text-text-primary mb-3"
+      >
+        <span>Execution timeline</span>
+        {isOpen ? <ChevronUp className="w-4 h-4 text-text-muted" /> : <ChevronDown className="w-4 h-4 text-text-muted" />}
+      </button>
+      <div className="text-xs text-text-secondary mb-2">
+        Run {result.run.id.slice(0, 10)} • {result.run_status || result.run.status}
+      </div>
+      {isOpen && (
+        <div className="space-y-2">
+          <div className="text-xs text-text-secondary">
+            {result.run.attempt_count} attempts • {transitions.length} transitions • {artifacts.length} artifacts
+          </div>
+          <div className="text-xs font-medium text-text-primary">
+            Status: {result.run_status || result.run.status} • Current: {result.run.current_state}
+          </div>
+          {result.run.failure_reason && (
+            <div className="text-xs text-red-500">Error: {result.run.failure_reason}</div>
+          )}
+          <div className="space-y-1.5">
+            {transitions.length > 0 ? transitions.map((t) => (
+              <div
+                key={t.id}
+                className={`px-2 py-1 rounded text-[11px] border ${
+                  t.failure_reason ? 'bg-red-50 border-red-200 text-red-700' : 'bg-sage-50 border-sage-200 text-text-primary'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span>{t.trigger}</span>
+                  <span>{t.next_state}</span>
+                </div>
+                {t.failure_reason && <div className="mt-0.5">{t.failure_reason}</div>}
+              </div>
+            )) : (
+              <p className="text-text-muted">No transitions recorded yet.</p>
+            )}
+          </div>
+          <div className="text-xs font-medium text-text-primary">
+            Artifacts
+          </div>
+          <div className="space-y-1.5">
+            {artifacts.length > 0 ? artifacts.map((artifact) => (
+              <div key={artifact.id} className="px-2 py-1 rounded border border-slate-200 text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">{artifact.step}</span>
+                  <span>attempt {artifact.attempt}</span>
+                </div>
+                <p className="text-text-muted mt-0.5">
+                  {artifact.payload ? Object.keys(artifact.payload).length : 0} payload fields
+                </p>
+              </div>
+            )) : (
+              <p className="text-text-muted">No artifacts recorded yet.</p>
+            )}
+          </div>
         </div>
       )}
     </div>

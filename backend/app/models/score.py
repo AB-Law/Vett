@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, JSON, String, Text, DateTime
 from sqlalchemy.sql import func
 from ..database import Base
@@ -18,6 +20,81 @@ class ScoreHistory(Base):
     agent_plan = Column(JSON)  # plan payload from second scoring pass
     llm_provider = Column(String(100))
     llm_model = Column(String(100))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+AGENT_STATE_QUEUED = "queued"
+AGENT_STATE_ROLE_ANALYSIS = "role_analysis"
+AGENT_STATE_EVIDENCE_SCAN = "evidence_scan"
+AGENT_STATE_SCORING = "scoring"
+AGENT_STATE_GAP_AUDIT = "gap_audit"
+AGENT_STATE_ACTION_PLAN = "action_plan"
+AGENT_STATE_REWRITE_PLAN = "rewrite_plan"
+AGENT_STATE_COMPLETED = "completed"
+AGENT_STATE_FAILED = "failed"
+AGENT_STATE_RETRY_SCHEDULED = "retry_scheduled"
+AGENT_STATE_CANCELLED = "cancelled"
+
+AGENT_TERMINAL_STATES = {
+    AGENT_STATE_COMPLETED,
+    AGENT_STATE_FAILED,
+    AGENT_STATE_RETRY_SCHEDULED,
+    AGENT_STATE_CANCELLED,
+}
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id = Column(String(36), primary_key=True, index=True)
+    score_history_id = Column(Integer, ForeignKey("score_history.id"), index=True, nullable=True)
+    cv_id = Column(Integer, nullable=True)
+    idempotency_key = Column(String(128), nullable=False, unique=True, index=True)
+    current_state = Column(String(40), nullable=False, default=AGENT_STATE_QUEUED)
+    actor = Column(String(80), default="system")
+    source = Column(String(80), default="api")
+    request_payload = Column(JSON, nullable=True)
+    failed_step = Column(String(40), nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
+    status = Column(String(40), nullable=False, default=AGENT_STATE_QUEUED)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AgentRunArtifact(Base):
+    __tablename__ = "agent_run_artifacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(36), ForeignKey("agent_runs.id"), index=True, nullable=False)
+    score_history_id = Column(Integer, ForeignKey("score_history.id"), index=True, nullable=True)
+    step = Column(String(40), nullable=False)
+    actor = Column(String(80), default="system")
+    source = Column(String(80), default="api")
+    payload = Column(JSON, nullable=True)
+    evidence = Column(JSON, nullable=True)
+    transition_id = Column(Integer, ForeignKey("agent_run_transitions.id"), nullable=True)
+    attempt = Column(Integer, default=1, nullable=False)
+    latency_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentRunTransition(Base):
+    __tablename__ = "agent_run_transitions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(36), ForeignKey("agent_runs.id"), index=True, nullable=False)
+    score_history_id = Column(Integer, ForeignKey("score_history.id"), index=True, nullable=True)
+    previous_state = Column(String(40), nullable=True)
+    next_state = Column(String(40), nullable=False)
+    trigger = Column(String(80), nullable=False)
+    attempt = Column(Integer, default=1, nullable=False)
+    failure_reason = Column(Text, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    idempotency_key = Column(String(128), nullable=False)
+    actor = Column(String(80), default="system")
+    source = Column(String(80), default="api")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
