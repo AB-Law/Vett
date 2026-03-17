@@ -72,8 +72,34 @@ export interface ScoreRequest {
   company?: string
 }
 
+export interface CVRewriteRequest {
+  job_description: string
+  job_title?: string
+  company?: string
+}
+
+export interface CVRewriteProposal {
+  before: string
+  after: string
+  reason: string
+  risk_or_uncertainty: string
+}
+
+export interface CVRewriteResponse {
+  proposals: CVRewriteProposal[]
+  job_title?: string
+  company?: string
+  llm_provider?: string
+  llm_model?: string
+}
+
 export const scoreJD = async (req: ScoreRequest): Promise<ScoreResult> => {
   const { data } = await api.post<ScoreResult>('/score/', req)
+  return data
+}
+
+export const getCVRewriteProposals = async (req: CVRewriteRequest): Promise<CVRewriteResponse> => {
+  const { data } = await api.post<CVRewriteResponse>('/score/rewrite-proposals', req)
   return data
 }
 

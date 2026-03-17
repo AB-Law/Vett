@@ -136,6 +136,40 @@ Role/Signal map:
 {role_signal_map}
 """
 
+CV_REWRITE_PROPOSAL_PROMPT = """
+You are a conservative CV rewrite agent supporting local-first manual review.
+
+Input:
+CV:
+{cv_text}
+
+Job Description:
+{jd_text}
+
+Role/Signal map:
+{role_signal_map}
+
+Score context:
+{score_snapshot}
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "proposals": [
+    {{
+      "before": "<short, exact or near-exact snippet from the CV, 1-2 lines>",
+      "after": "<proposed replacement snippet, same scope/intent>",
+      "reason": "<why this improves JD alignment>",
+      "risk_or_uncertainty": "<risk or uncertainty about correctness / overclaim>"
+    }}
+  ]
+}}
+
+Guidelines:
+- Keep snippets grounded in the CV style and do not invent dates, companies, or achievements.
+- Provide exactly 3-6 proposals unless evidence is weak.
+- Do not include any markdown, bullets, or extra prose outside JSON.
+"""
+
 
 ROLE_SIGNAL_MAP_PROMPT = """You are an extraction agent for career-role matching.
 
@@ -284,6 +318,65 @@ def _coerce_agent_plan_payload(
     }
 
 
+def _coerce_rewrite_proposals(
+    value: object,
+    score_payload: dict[str, Any] | None,
+    role_signal_map: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    if not isinstance(value, dict):
+        return []
+
+    proposal_list = value.get("proposals")
+    if not isinstance(proposal_list, list):
+        return []
+
+    proposals = []
+    for item in proposal_list:
+        if not isinstance(item, dict):
+            continue
+        before = _coerce_non_empty_string(item.get("before"))
+        after = _coerce_non_empty_string(item.get("after"))
+        if not before or not after:
+            continue
+        reason = _coerce_non_empty_string(item.get("reason")) or "Adds a focused alignment edit for CV reviewability."
+        risk = _coerce_non_empty_string(item.get("risk_or_uncertainty")) or _coerce_non_empty_string(item.get("uncertainty")) or "Moderate confidence due to ambiguity or parser variance."
+        proposals.append(
+            {
+                "before": before,
+                "after": after,
+                "reason": reason,
+                "risk_or_uncertainty": risk,
+            }
+        )
+
+    if proposals:
+        return proposals
+
+    fallback_missing = _coerce_string_list((score_payload or {}).get("missing_keywords")) if isinstance(score_payload, dict) else []
+    summary = _coerce_non_empty_string((role_signal_map or {}).get("role_summary"))
+    fallback_prefix = summary or "targeted role requirements"
+
+    if not fallback_missing:
+        return [
+            {
+                "before": "Current CV text is already the only source for safe edits.",
+                "after": "Add one concrete, evidence-backed bullet that mirrors a high-priority requirement from the job description.",
+                "reason": f"The model did not return structured rewrite candidates; this keeps updates constrained to verifiable sections.",
+                "risk_or_uncertainty": f"Fallback is generic for {fallback_prefix}. Review carefully against the original CV data.",
+            }
+        ]
+
+    return [
+        {
+            "before": f"Gap area for \"{missing}\" currently not visible.",
+            "after": f"Add one concise CV bullet demonstrating quantified ownership in \"{missing}\".",
+            "reason": f"Job description emphasis indicates this signal is likely expected for {fallback_prefix}.",
+            "risk_or_uncertainty": "Risk of overclaim if this skill is not directly supported in CV evidence.",
+        }
+        for missing in fallback_missing[:4]
+    ]
+
+
 async def extract_role_signal_map(cv_text: str, jd_text: str) -> dict[str, str | list[str]]:
     """Extract role and signal metadata for downstream scoring and planning."""
     import litellm
@@ -368,6 +461,50 @@ async def score_cv_against_jd(
     data["rewrite_suggestions"] = data.get("rewrite_suggestions") or []
 
     return data
+
+
+async def generate_cv_rewrite_proposals(
+    cv_text: str,
+    jd_text: str,
+    role_signal_map: dict[str, Any] | None = None,
+    score_payload: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    import litellm
+
+    model, kwargs = _get_litellm_model()
+    safe_map = _coerce_signal_map(role_signal_map)
+    safe_score = _coerce_score_payload(score_payload or {})
+
+    prompt = CV_REWRITE_PROPOSAL_PROMPT.format(
+        cv_text=cv_text[:7000],
+        jd_text=jd_text[:4500],
+        role_signal_map=json.dumps(safe_map, ensure_ascii=False) if safe_map else "No role/signal map available.",
+        score_snapshot=json.dumps(safe_score, ensure_ascii=False),
+    )
+
+    response = await litellm.acompletion(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.25,
+        max_tokens=1200,
+        **kwargs,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    match = _extract_first_json_object(raw)
+    if match:
+        raw = match
+
+    parsed: object
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        try:
+            parsed = json.loads(_sanitize_json_token_stream(raw))
+        except Exception:
+            parsed = {}
+
+    return _coerce_rewrite_proposals(parsed, score_payload=score_payload or {}, role_signal_map=safe_map)
 
 
 async def generate_agent_score_plan(
