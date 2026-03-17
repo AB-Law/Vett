@@ -9,7 +9,7 @@ import re
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import asc, desc
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Optional
 import asyncio
 import json
@@ -306,8 +306,7 @@ class JobItem(BaseModel):
     gap_analysis: Optional[str]
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 @router.post("/search")

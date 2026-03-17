@@ -1,6 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ..database import get_db
 from ..models.cv import CV
@@ -17,8 +17,7 @@ class CVResponse(BaseModel):
     parsed_text: str
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 @router.post("/upload", response_model=CVResponse)
