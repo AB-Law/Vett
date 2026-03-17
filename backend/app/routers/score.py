@@ -47,6 +47,7 @@ class ScoreResponse(BaseModel):
     missing_keywords: list[str]
     gap_analysis: str
     rewrite_suggestions: list[str]
+    reason: str | None = None
     job_title: Optional[str] = None
     company: Optional[str] = None
     llm_provider: Optional[str] = None
@@ -139,6 +140,7 @@ class HistoryItem(BaseModel):
     matched_keywords: list[str]
     missing_keywords: list[str]
     gap_analysis: Optional[str]
+    reason: str | None = None
     rewrite_suggestions: list[str]
     llm_provider: Optional[str]
     llm_model: Optional[str]
@@ -285,6 +287,7 @@ async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
             matched_keywords=_coerce_string_items(result.get("matched_keywords", [])),
             missing_keywords=_coerce_string_items(result.get("missing_keywords", [])),
             gap_analysis=_coerce_text(result.get("gap_analysis")),
+            reason=_coerce_text(result.get("reason")),
             rewrite_suggestions=_coerce_string_items(result.get("rewrite_suggestions", [])),
             agent_plan=_coerce_dict(result.get("agent_plan")),
             llm_provider=settings.active_llm_provider,
@@ -296,6 +299,7 @@ async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
 
         link_score_history_to_run(db, run_id=orchestrator_result.run_id, score_history_id=entry.id)
         result["id"] = entry.id
+        result.setdefault("reason", entry.reason)
 
     run, transitions, artifacts = get_run_timeline(db, orchestrator_result.run_id)
     if run is None:
@@ -416,6 +420,7 @@ def get_history(db: Session = Depends(get_db)):
             matched_keywords=i.matched_keywords or [],
             missing_keywords=i.missing_keywords or [],
             gap_analysis=i.gap_analysis,
+            reason=i.reason,
             rewrite_suggestions=i.rewrite_suggestions or [],
             llm_provider=i.llm_provider,
             llm_model=i.llm_model,

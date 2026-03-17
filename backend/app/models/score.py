@@ -16,6 +16,7 @@ class ScoreHistory(Base):
     matched_keywords = Column(JSON)   # list of strings
     missing_keywords = Column(JSON)   # list of strings
     gap_analysis = Column(Text)
+    reason = Column(Text)
     rewrite_suggestions = Column(JSON)  # list of strings
     agent_plan = Column(JSON)  # plan payload from second scoring pass
     llm_provider = Column(String(100))
@@ -133,6 +134,7 @@ class Job(Base):
     matched_keywords = Column(JSON)
     missing_keywords = Column(JSON)
     gap_analysis = Column(Text)
+    reason = Column(Text)
     scored_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

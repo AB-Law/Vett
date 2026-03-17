@@ -110,6 +110,7 @@ def _coerce_score_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "matched_keywords": _coerce_list(payload.get("matched_keywords")),
         "missing_keywords": _coerce_list(payload.get("missing_keywords")),
         "gap_analysis": _coerce_text(payload.get("gap_analysis")),
+        "reason": _coerce_text(payload.get("reason")),
         "rewrite_suggestions": _coerce_list(payload.get("rewrite_suggestions")),
     }
 
@@ -361,6 +362,7 @@ def _normalize_final_response(
         rewrite_suggestions = _coerce_list(rewrite_artifact.payload.get("rewrite_suggestions"))
 
     normalized = _coerce_score_payload(scoring_payload)
+    normalized["reason"] = _coerce_text(current_score.get("reason")) or normalized.get("reason")
     normalized["gap_analysis"] = gap_analysis
     normalized["rewrite_suggestions"] = rewrite_suggestions
     normalized["agent_plan"] = current_score.get("agent_plan") or _coerce_dict(current_score.get("role_signal_map"))

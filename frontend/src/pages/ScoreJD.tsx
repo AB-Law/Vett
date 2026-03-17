@@ -228,6 +228,16 @@ function ResultPanel({
         </div>
       )}
 
+      {result.reason && (
+        <div className="card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertCircle className="w-4 h-4 text-text-secondary" />
+            <span className="text-sm font-semibold text-text-primary">Why this score</span>
+          </div>
+          <p className="text-sm text-text-secondary leading-relaxed">{result.reason}</p>
+        </div>
+      )}
+
       {/* Agent Plan */}
       {result.agent_plan && (
         <div className="card p-4">

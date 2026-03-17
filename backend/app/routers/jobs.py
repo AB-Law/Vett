@@ -98,7 +98,7 @@ def _coerce_int(value: object, fallback: int = 0) -> int:
         return fallback
 
 
-def _result_score_fields(result: dict[str, object]) -> tuple[int, list[str], list[str], str, list[str]]:
+def _result_score_fields(result: dict[str, object]) -> tuple[int, list[str], list[str], str, str, list[str]]:
     fit_score = _coerce_int(result.get("fit_score"), 0)
     if fit_score < 0:
         fit_score = 0
@@ -122,6 +122,7 @@ def _result_score_fields(result: dict[str, object]) -> tuple[int, list[str], lis
         [str(item).strip() for item in matched if str(item).strip()],
         [str(item).strip() for item in missing if str(item).strip()],
         str(gap_analysis) if gap_analysis is not None else "",
+        str((result or {}).get("reason", "")) if isinstance((result or {}).get("reason"), str) else "",
         [str(item).strip() for item in rewrite if str(item).strip()],
     )
 
@@ -296,11 +297,12 @@ async def _process_rescore_run(run_id: str) -> None:
                 db.commit()
                 continue
 
-            fit_score, matched_keywords, missing_keywords, gap_analysis, _ = _result_score_fields(orchestrator_result.result)
+            fit_score, matched_keywords, missing_keywords, gap_analysis, reason, _ = _result_score_fields(orchestrator_result.result)
             job.fit_score = fit_score
             job.matched_keywords = matched_keywords
             job.missing_keywords = missing_keywords
             job.gap_analysis = gap_analysis
+            job.reason = reason
             job.scored_at = datetime.utcnow()
 
             run.scored_count += 1
@@ -363,6 +365,7 @@ class JobItem(BaseModel):
     matched_keywords: Optional[list[str]]
     missing_keywords: Optional[list[str]]
     gap_analysis: Optional[str]
+    reason: Optional[str]
     created_at: str
 
     model_config = ConfigDict(from_attributes=True)
@@ -595,6 +598,7 @@ def list_jobs(
             matched_keywords=j.matched_keywords or [],
             missing_keywords=j.missing_keywords or [],
             gap_analysis=j.gap_analysis,
+            reason=j.reason,
             created_at=str(j.created_at),
         )
         for j in jobs
@@ -638,6 +642,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
         matched_keywords=job.matched_keywords or [],
         missing_keywords=job.missing_keywords or [],
         gap_analysis=job.gap_analysis,
+        reason=job.reason,
         created_at=str(job.created_at),
     )
 

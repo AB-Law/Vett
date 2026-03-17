@@ -51,6 +51,7 @@ export interface ScoreResult {
   missing_keywords: string[]
   gap_analysis: string
   rewrite_suggestions: string[]
+  reason?: string
   agent_plan?: ScoreAgentPlan
   job_title?: string
   company?: string
@@ -242,6 +243,7 @@ export interface Job {
   matched_keywords?: string[]
   missing_keywords?: string[]
   gap_analysis?: string
+  reason?: string
   created_at: string
 }
 
