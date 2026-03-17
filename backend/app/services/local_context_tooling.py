@@ -550,8 +550,9 @@ def _fetch_recent_history(
 
     events: list[RecentEvent] = []
     for item in rows:
+        fit_score = 0.0 if item.fit_score is None else float(item.fit_score)
         metadata = {
-            "fit_score": float(item.fit_score),
+            "fit_score": fit_score,
             "job_title": item.job_title,
             "company": item.company,
             "llm_provider": item.llm_provider,
@@ -562,7 +563,7 @@ def _fetch_recent_history(
         events.append(
             RecentEvent(
                 timestamp=item.created_at.isoformat().replace("+00:00", "Z") if item.created_at else _deterministic_timestamp(str(item.id)),
-                actor=str(arguments.user_id),
+                actor=context.user_id or str(arguments.user_id),
                 action="score_jd",
                 metadata=metadata,
             )

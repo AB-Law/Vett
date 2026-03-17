@@ -1,5 +1,6 @@
 import pytest
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -14,8 +15,10 @@ from app.services.local_context_tooling import (
     ToolAuthorizationError,
     ToolExecutionContext,
     ToolSchemaError,
+    FetchRecentHistoryInput,
     execute_from_prompt,
     execute_tool,
+    _fetch_recent_history,
 )
 
 
@@ -168,3 +171,55 @@ def test_execute_from_prompt_parses_tool_payload():
     assert result.tool_name == "suggest_next_constraint"
     assert result.output["suggestion"]["constraint_key"]
     assert isinstance(result.output["alternatives"], list)
+
+
+def test_fetch_recent_history_handles_null_fit_score_and_context_actor():
+    context = _baseline_context(actor_role="admin", environment="dev", user_id="caller-42")
+    fake_row = SimpleNamespace(
+        id=1,
+        fit_score=None,
+        job_title="Product Engineer",
+        company="Acme",
+        llm_provider="openai",
+        llm_model="gpt-4",
+        created_at=None,
+        job_description="Need distributed systems experience.",
+    )
+
+    class _FakeQuery:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _FakeDb:
+        def query(self, *args, **kwargs):
+            return _FakeQuery([fake_row])
+
+    arguments = FetchRecentHistoryInput(
+        user_id="payload-user-99",
+        window_hours=24,
+        max_items=5,
+        include_internal_notes=False,
+    )
+
+    result = _fetch_recent_history(
+        db=_FakeDb(),
+        context=context,
+        arguments=arguments,
+    )
+
+    assert isinstance(result.events, list)
+    assert len(result.events) == 1
+    assert result.events[0].actor == "caller-42"
+    assert result.events[0].metadata["fit_score"] == 0.0
