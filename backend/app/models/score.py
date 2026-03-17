@@ -15,6 +15,9 @@ class ScoreHistory(Base):
     fit_score = Column(Float, nullable=False)
     matched_keywords = Column(JSON)   # list of strings
     missing_keywords = Column(JSON)   # list of strings
+    matched_keyword_evidence = Column(JSON)  # list[dict]
+    missing_keyword_evidence = Column(JSON)  # list[dict]
+    rewrite_suggestion_evidence = Column(JSON)  # list[dict]
     gap_analysis = Column(Text)
     reason = Column(Text)
     rewrite_suggestions = Column(JSON)  # list of strings

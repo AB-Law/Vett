@@ -119,11 +119,78 @@ Given the following CV and job description, analyse how well the CV matches the 
 
 Return ONLY valid JSON with this exact structure:
 {{
+  "score_payload_version": "evidence-grounded-v1",
   "fit_score": <integer 0-100>,
   "matched_keywords": [<list of strings>],
   "missing_keywords": [<list of strings>],
   "gap_analysis": "<2-4 sentence narrative>",
-  "rewrite_suggestions": [<list of 3-5 specific suggestion strings>]
+  "rewrite_suggestions": [<list of 3-5 specific suggestion strings>],
+  "matched_keyword_evidence": [
+    {
+      "value": "<matched keyword>",
+      "cv_citations": [
+        {
+          "section_id": "<stable section id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }
+      ],
+      "jd_phrase_citations": [
+        {
+          "phrase_id": "<stable jd phrase id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }
+      ],
+      "evidence_missing_reason": null | "<why evidence was not available>"
+    }
+  ],
+  "missing_keyword_evidence": [
+    {
+      "value": "<missing keyword>",
+      "cv_citations": [
+        {
+          "section_id": "<stable section id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }
+      ],
+      "jd_phrase_citations": [
+        {
+          "phrase_id": "<stable jd phrase id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }
+      ],
+      "evidence_missing_reason": "<required if evidence is not available>"
+    }
+  ],
+  "rewrite_suggestion_evidence": [
+    {
+      "value": "<rewrite suggestion>",
+      "cv_citations": [
+        {
+          "section_id": "<stable section id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }
+      ],
+      "jd_phrase_citations": [
+        {
+          "phrase_id": "<stable jd phrase id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }
+      ],
+      "evidence_missing_reason": null | "<why evidence was not available>"
+    }
+  ]
 }}
 
 CV:
@@ -259,14 +326,199 @@ def _coerce_list_block(value: object) -> list[str]:
     return _coerce_string_list(value)[:8]
 
 
+def _coerce_int(value: object, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _normalize_evidence_snippet(value: object, max_chars: int = 220) -> str:
+    raw = _coerce_non_empty_string(value)
+    if not raw:
+        return ""
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return raw.strip()[:max_chars]
+    return " | ".join(lines[:2])[:max_chars]
+
+
+def _coerce_line_range(value: object) -> tuple[int, int]:
+    values = value if isinstance(value, dict) else {}
+    line_start = _coerce_int(values.get("start"), 1)
+    line_end = _coerce_int(values.get("end"), line_start)
+    if line_start < 1:
+        line_start = 1
+    if line_end < line_start:
+        line_end = line_start
+    return line_start, line_end
+
+
+def _coerce_cv_citation(value: object, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    section_id = _coerce_non_empty_string(value.get("section_id")) or _coerce_non_empty_string(value.get("id"))
+    if not section_id:
+        section_id = f"cv_section_{index + 1}"
+    line_start = _coerce_int(value.get("line_start"), index + 1)
+    line_end = _coerce_int(value.get("line_end"), line_start)
+    if isinstance(value.get("line_range"), dict):
+        line_start, line_end = _coerce_line_range(value.get("line_range"))
+    if line_start < 1:
+        line_start = 1
+    if line_end < line_start:
+        line_end = line_start
+    return {
+        "section_id": section_id,
+        "line_start": line_start,
+        "line_end": line_end,
+        "snippet": _normalize_evidence_snippet(value.get("snippet")),
+    }
+
+
+def _coerce_jd_citation(value: object, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    phrase_id = _coerce_non_empty_string(value.get("phrase_id")) or _coerce_non_empty_string(value.get("id"))
+    if not phrase_id:
+        phrase_id = f"jd_phrase_{index + 1}"
+    line_start = _coerce_int(value.get("line_start"), index + 1)
+    line_end = _coerce_int(value.get("line_end"), line_start)
+    if isinstance(value.get("line_range"), dict):
+        line_start, line_end = _coerce_line_range(value.get("line_range"))
+    if line_start < 1:
+        line_start = 1
+    if line_end < line_start:
+        line_end = line_start
+    return {
+        "phrase_id": phrase_id,
+        "phrase": _coerce_non_empty_string(value.get("phrase")) or "",
+        "line_start": line_start,
+        "line_end": line_end,
+        "snippet": _normalize_evidence_snippet(value.get("snippet")),
+    }
+
+
+def _coerce_citation_list(values: object, kind: str, index_offset: int = 0) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    output: list[dict[str, Any]] = []
+    for offset, value in enumerate(values):
+        if kind == "cv":
+            citation = _coerce_cv_citation(value, index_offset + offset)
+        else:
+            citation = _coerce_jd_citation(value, index_offset + offset)
+        if citation is None:
+            continue
+        if _normalize_evidence_snippet(citation.get("snippet")):
+            output.append(citation)
+    return output
+
+
+def _coerce_score_evidence_record(value: object, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    entry_value = _coerce_non_empty_string(
+        value.get("value")
+        or value.get("keyword")
+        or value.get("suggestion")
+        or value.get("item")
+    )
+    if not entry_value:
+        return None
+    record = {
+        "value": entry_value,
+        "cv_citations": _coerce_citation_list(
+            value.get("cv_citations"),
+            kind="cv",
+            index_offset=index,
+        ),
+        "jd_phrase_citations": _coerce_citation_list(
+            value.get("jd_phrase_citations"),
+            kind="jd",
+            index_offset=index,
+        ),
+        "evidence_missing_reason": _coerce_non_empty_string(value.get("evidence_missing_reason")),
+    }
+    if not record["cv_citations"] and not record["jd_phrase_citations"] and not record["evidence_missing_reason"]:
+        record["evidence_missing_reason"] = (
+            f"Evidence could not be attached for \"{entry_value}\". "
+            "Re-run scoring with citation capture enabled."
+        )
+    return record
+
+
+def _coerce_score_evidence_rows(items: object, evidence_values: object, *, item_label: str) -> list[dict[str, Any]]:
+    item_values = _coerce_string_list(items)
+    raw_records: list[dict[str, Any]] = []
+    for index, raw_record in enumerate(_coerce_list_block(evidence_values)):
+        parsed = _coerce_score_evidence_record(raw_record, index)
+        if parsed is not None:
+            raw_records.append(parsed)
+
+    records_by_value: dict[str, list[dict[str, Any]]] = {}
+    for record in raw_records:
+        key = str(record["value"]).strip().lower()
+        if not key:
+            continue
+        records_by_value.setdefault(key, []).append(record)
+
+    output: list[dict[str, Any]] = []
+    for item in item_values:
+        normalized_item = item.strip()
+        if not normalized_item:
+            continue
+        normalized_key = normalized_item.lower()
+        row = records_by_value.get(normalized_key, []).pop(0) if normalized_key in records_by_value else None
+        if row:
+            row["value"] = normalized_item
+            output.append(row)
+            continue
+        output.append(
+            {
+                "value": normalized_item,
+                "cv_citations": [],
+                "jd_phrase_citations": [],
+                "evidence_missing_reason": (
+                    f"No evidence row was returned for \"{normalized_item}\" in the {item_label} block."
+                ),
+            }
+        )
+    return output
+
+
 def _coerce_score_payload(score_payload: dict[str, Any]) -> dict[str, Any]:
     """Return a compact payload for downstream prompts."""
+    matched_keyword_evidence = _coerce_score_evidence_rows(
+        score_payload.get("matched_keywords"),
+        score_payload.get("matched_keyword_evidence"),
+        item_label="matched keyword",
+    )
+    missing_keyword_evidence = _coerce_score_evidence_rows(
+        score_payload.get("missing_keywords"),
+        score_payload.get("missing_keyword_evidence"),
+        item_label="missing keyword",
+    )
+    rewrite_suggestion_evidence = _coerce_score_evidence_rows(
+        score_payload.get("rewrite_suggestions"),
+        score_payload.get("rewrite_suggestion_evidence"),
+        item_label="rewrite suggestion",
+    )
+    fit_score = _coerce_int(score_payload.get("fit_score"), 0)
+    if fit_score < 0:
+        fit_score = 0
+    if fit_score > 100:
+        fit_score = 100
     return {
-        "fit_score": score_payload.get("fit_score"),
+        "score_payload_version": _coerce_non_empty_string(score_payload.get("score_payload_version")) or "v1",
+        "fit_score": fit_score,
         "matched_keywords": _coerce_list_block(score_payload.get("matched_keywords")),
         "missing_keywords": _coerce_list_block(score_payload.get("missing_keywords")),
         "gap_analysis": _coerce_non_empty_string(score_payload.get("gap_analysis")) or "",
         "rewrite_suggestions": _coerce_list_block(score_payload.get("rewrite_suggestions")),
+        "matched_keyword_evidence": matched_keyword_evidence,
+        "missing_keyword_evidence": missing_keyword_evidence,
+        "rewrite_suggestion_evidence": rewrite_suggestion_evidence,
     }
 
 
@@ -451,16 +703,16 @@ async def score_cv_against_jd(
     if match:
         raw = match.group(0)
 
-    data = json.loads(raw)
-
-    # Normalise
-    data["fit_score"] = max(0, min(100, int(data.get("fit_score", 0))))
-    data["matched_keywords"] = data.get("matched_keywords") or []
-    data["missing_keywords"] = data.get("missing_keywords") or []
-    data["gap_analysis"] = data.get("gap_analysis") or ""
-    data["rewrite_suggestions"] = data.get("rewrite_suggestions") or []
-
-    return data
+    try:
+        data = json.loads(raw)
+    except Exception:
+        try:
+            data = json.loads(_sanitize_json_token_stream(raw))
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return _coerce_score_payload(data)
 
 
 async def generate_cv_rewrite_proposals(

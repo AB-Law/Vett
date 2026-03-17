@@ -113,6 +113,12 @@ def _coerce_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _coerce_evidence_records(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    return []
+
+
 def _coerce_string_items(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -194,7 +200,7 @@ def _validate_scoring_output_payload(
     try:
         int(score_payload["fit_score"])
     except Exception:
-        issues.append("Score payload field 'fit_score' must be integer-compatible.")
+        issues.append("Score payload field 'fit_score' must be an integer-compatible value.")
 
     if not isinstance(score_payload["matched_keywords"], list):
         issues.append("Score payload field 'matched_keywords' must be a list.")
@@ -272,6 +278,9 @@ def _coerce_score_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "gap_analysis": _coerce_text(payload.get("gap_analysis")),
         "reason": _coerce_text(payload.get("reason")),
         "rewrite_suggestions": _coerce_list(payload.get("rewrite_suggestions")),
+        "matched_keyword_evidence": _coerce_evidence_records(payload.get("matched_keyword_evidence")),
+        "missing_keyword_evidence": _coerce_evidence_records(payload.get("missing_keyword_evidence")),
+        "rewrite_suggestion_evidence": _coerce_evidence_records(payload.get("rewrite_suggestion_evidence")),
     }
 
 

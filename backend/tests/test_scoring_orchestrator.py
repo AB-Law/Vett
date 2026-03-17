@@ -135,6 +135,116 @@ def test_orchestrator_records_full_step_transitions(monkeypatch):
     assert len(artifacts) == 6
 
 
+def test_orchestrator_preserves_scoring_evidence_rows(monkeypatch):
+    Session = _make_session_factory()
+    db = Session()
+    _seed_cv(db)
+
+    async def fake_role_analysis(cv_text, jd_text):
+        return {"role_summary": "backend"}, {"evidence_snippets": ["python", "apis"]}
+
+    async def fake_evidence_scan(cv_text, jd_text, role_signal_map):
+        return {
+            "top_responsibilities": ["Build APIs"],
+            "top_skills": ["Python"],
+            "experience_signals": ["5+ years"],
+        }, {}
+
+    async def fake_scoring(cv_text, jd_text, role_signal_map):
+        return {
+            "fit_score": 87,
+            "matched_keywords": ["python", "api"],
+            "missing_keywords": ["k8s"],
+            "gap_analysis": "Needs stronger systems scale signals.",
+            "rewrite_suggestions": ["Add ownership example"],
+            "matched_keyword_evidence": [
+                {
+                    "value": "python",
+                    "cv_citations": [
+                        {
+                            "section_id": "experience",
+                            "line_start": 1,
+                            "line_end": 1,
+                            "snippet": "Experienced backend engineer.",
+                        }
+                    ],
+                    "jd_phrase_citations": [
+                        {
+                            "phrase_id": "phrase-1",
+                            "line_start": 1,
+                            "line_end": 2,
+                            "snippet": "Build APIs",
+                        }
+                    ],
+                },
+                {
+                    "value": "api",
+                    "cv_citations": [],
+                    "jd_phrase_citations": [],
+                    "evidence_missing_reason": "No matching API phrase was found in the JD source parse.",
+                },
+            ],
+            "missing_keyword_evidence": [
+                {
+                    "value": "k8s",
+                    "cv_citations": [],
+                    "jd_phrase_citations": [
+                        {"phrase_id": "phrase-2", "line_start": 7, "line_end": 7, "snippet": "Kubernetes ownership"},
+                    ],
+                }
+            ],
+            "rewrite_suggestion_evidence": [
+                {
+                    "value": "Add ownership example",
+                    "cv_citations": [],
+                    "jd_phrase_citations": [],
+                    "evidence_missing_reason": "No rewrite-specific citation map returned.",
+                }
+            ],
+        }, {"fit_score": 87}
+
+    async def fake_gap_audit(role_signal_map, score_payload):
+        return {
+            "gaps_to_address": ["k8s"],
+            "role_signal_focus": ["senior"],
+        }, {}
+
+    async def fake_action_plan(cv_text, jd_text, score_payload, role_signal_map):
+        return {"skills_to_fix_first": ["k8s"]}, {"plan_fields": ["skills"]}
+
+    def fake_rewrite_plan(score_payload):
+        return {"rewrite_suggestions": ["Quantify delivery metrics"]}, {}
+
+    monkeypatch.setattr(orchestrator, "_run_role_analysis_step", fake_role_analysis)
+    monkeypatch.setattr(orchestrator, "_run_evidence_scan_step", fake_evidence_scan)
+    monkeypatch.setattr(orchestrator, "_run_scoring_step", fake_scoring)
+    monkeypatch.setattr(orchestrator, "_run_gap_audit_step", fake_gap_audit)
+    monkeypatch.setattr(orchestrator, "_run_action_plan_step", fake_action_plan)
+    monkeypatch.setattr(orchestrator, "_run_rewrite_plan_step", fake_rewrite_plan)
+
+    result = asyncio.run(
+        orchestrator.execute_scoring_orchestrator(
+            db,
+            cv_id=1,
+            cv_text="Experienced backend engineer.",
+            job_title="Senior backend engineer",
+            company="Acme",
+            job_description="Build robust API services.",
+            actor="test",
+            source="api",
+            idempotency_key="with-evidence",
+        )
+    )
+
+    assert result.result["matched_keyword_evidence"][0]["value"] == "python"
+    assert len(result.result["missing_keyword_evidence"]) == 1
+    assert result.result["rewrite_suggestion_evidence"][0]["value"] == "Add ownership example"
+
+    scoring_payload = next(item for item in result.artifacts if item.step == AGENT_STATE_SCORING)
+    assert len(scoring_payload.payload["matched_keyword_evidence"]) == 2
+    assert len(scoring_payload.payload["rewrite_suggestion_evidence"]) == 1
+
+
 def test_orchestrator_is_idempotent_with_same_idempotency_key(monkeypatch):
     Session = _make_session_factory()
     db = Session()

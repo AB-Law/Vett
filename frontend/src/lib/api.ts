@@ -51,6 +51,9 @@ export interface ScoreResult {
   missing_keywords: string[]
   gap_analysis: string
   rewrite_suggestions: string[]
+  matched_keyword_evidence: ScoreEvidenceRecord[]
+  missing_keyword_evidence: ScoreEvidenceRecord[]
+  rewrite_suggestion_evidence: ScoreEvidenceRecord[]
   reason?: string
   agent_plan?: ScoreAgentPlan
   job_title?: string
@@ -106,6 +109,21 @@ export interface ScoreRunArtifact {
   created_at: string
   transition_id: number | null
   score_history_id: number | null
+}
+
+export interface EvidenceCitation {
+  section_id?: string
+  phrase_id?: string
+  line_start?: number
+  line_end?: number
+  snippet?: string
+}
+
+export interface ScoreEvidenceRecord {
+  value: string
+  cv_citations: EvidenceCitation[]
+  jd_phrase_citations: EvidenceCitation[]
+  evidence_missing_reason?: string
 }
 
 export interface ScoreAgentPlan {
