@@ -14,7 +14,7 @@ from typing import Any, Optional
 import asyncio
 import json
 from ..scrapers.linkedin import scrape_linkedin
-from ..services.llm import score_cv_against_jd
+from ..services.scoring_orchestrator import execute_scoring_orchestrator
 from ..services.scrape_storage import store_scrape_results
 
 from ..database import SessionLocal, get_db
@@ -89,6 +89,41 @@ def _as_int_list(value: object) -> list[int]:
         except (TypeError, ValueError):
             continue
     return output
+
+
+def _coerce_int(value: object, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _result_score_fields(result: dict[str, object]) -> tuple[int, list[str], list[str], str, list[str]]:
+    fit_score = _coerce_int(result.get("fit_score"), 0)
+    if fit_score < 0:
+        fit_score = 0
+    if fit_score > 100:
+        fit_score = 100
+
+    matched = result.get("matched_keywords")
+    missing = result.get("missing_keywords")
+    gap_analysis = result.get("gap_analysis")
+    rewrite = result.get("rewrite_suggestions")
+
+    if not isinstance(matched, list):
+        matched = []
+    if not isinstance(missing, list):
+        missing = []
+    if not isinstance(rewrite, list):
+        rewrite = []
+
+    return (
+        fit_score,
+        [str(item).strip() for item in matched if str(item).strip()],
+        [str(item).strip() for item in missing if str(item).strip()],
+        str(gap_analysis) if gap_analysis is not None else "",
+        [str(item).strip() for item in rewrite if str(item).strip()],
+    )
 
 
 def _rescore_run_payload(run: RescoreRun) -> JobRescoreResponse:
@@ -223,7 +258,17 @@ async def _process_rescore_run(run_id: str) -> None:
                 continue
 
             try:
-                result = await score_cv_against_jd(cv.parsed_text, job.description)
+                orchestrator_result = await execute_scoring_orchestrator(
+                    db,
+                    cv_id=cv.id,
+                    cv_text=cv.parsed_text,
+                    job_title=job.title,
+                    company=job.company,
+                    job_description=job.description,
+                    actor="jobs.rescore_worker",
+                    source="jobs",
+                    idempotency_key=f"jobs:{run_id}:job:{job.id}",
+                )
             except Exception:
                 logger.exception("Score failed for job %s (run %s)", job.id, run_id)
                 if job.id not in failed_job_ids:
@@ -238,10 +283,24 @@ async def _process_rescore_run(run_id: str) -> None:
                 db.commit()
                 continue
 
-            job.fit_score = result["fit_score"]
-            job.matched_keywords = result["matched_keywords"]
-            job.missing_keywords = result["missing_keywords"]
-            job.gap_analysis = result["gap_analysis"]
+            if orchestrator_result.status == "failed":
+                if job.id not in failed_job_ids:
+                    failed_job_ids.append(job.id)
+                    run.failed_count += 1
+                run.failed_job_ids = failed_job_ids
+                run.message = (
+                    f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
+                    f"{run.scored_count} scored, {run.failed_count} failed."
+                )
+                run.updated_at = datetime.utcnow()
+                db.commit()
+                continue
+
+            fit_score, matched_keywords, missing_keywords, gap_analysis, _ = _result_score_fields(orchestrator_result.result)
+            job.fit_score = fit_score
+            job.matched_keywords = matched_keywords
+            job.missing_keywords = missing_keywords
+            job.gap_analysis = gap_analysis
             job.scored_at = datetime.utcnow()
 
             run.scored_count += 1

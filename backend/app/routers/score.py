@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, ConfigDict, Field
@@ -5,12 +7,17 @@ from typing import Any, Optional
 
 from ..database import get_db
 from ..models.cv import CV
-from ..models.score import ScoreHistory
+from ..models.score import AgentRunArtifact, AgentRunTransition, ScoreHistory
 from ..services.llm import (
     extract_role_signal_map,
-    generate_agent_score_plan,
     generate_cv_rewrite_proposals,
+    generate_agent_score_plan,
     score_cv_against_jd,
+)
+from ..services.scoring_orchestrator import (
+    execute_scoring_orchestrator,
+    get_run_timeline,
+    link_score_history_to_run,
 )
 from ..config import get_settings
 
@@ -45,6 +52,61 @@ class ScoreResponse(BaseModel):
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
     agent_plan: Optional[AgentPlan] = None
+    run: ScoreRunState | None = None
+    run_transitions: list[ScoreRunTransition] = Field(default_factory=list)
+    run_artifacts: list[ScoreRunArtifact] = Field(default_factory=list)
+    run_id: str | None = None
+    run_state: str | None = None
+    run_status: str | None = None
+    run_attempt_count: int | None = None
+    run_error: str | None = None
+
+
+class ScoreRunTransition(BaseModel):
+    id: int
+    previous_state: str | None
+    next_state: str
+    trigger: str
+    attempt: int
+    failure_reason: str | None = None
+    latency_ms: int | None = None
+    idempotency_key: str
+    created_at: str
+    actor: str
+    source: str
+
+
+class ScoreRunArtifact(BaseModel):
+    id: int
+    step: str
+    payload: dict[str, Any] | None = None
+    evidence: dict[str, Any] | None = None
+    attempt: int
+    latency_ms: int | None = None
+    actor: str
+    source: str
+    created_at: str
+    transition_id: int | None = None
+    score_history_id: int | None = None
+
+
+class ScoreRunState(BaseModel):
+    id: str
+    current_state: str
+    status: str
+    attempt_count: int
+    failed_step: str | None = None
+    failure_reason: str | None = None
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
+    score_history_id: int | None = None
+
+
+class ScoreRunTimelineResponse(BaseModel):
+    run: ScoreRunState
+    transitions: list[ScoreRunTransition]
+    artifacts: list[ScoreRunArtifact]
 
 
 class RewriteProposal(BaseModel):
@@ -111,6 +173,50 @@ def _fallback_agent_plan(
     }
 
 
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _coerce_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _serialize_transition(transition: AgentRunTransition) -> dict[str, Any]:
+    return {
+        "id": transition.id,
+        "previous_state": transition.previous_state,
+        "next_state": transition.next_state,
+        "trigger": transition.trigger,
+        "attempt": transition.attempt,
+        "failure_reason": transition.failure_reason,
+        "latency_ms": transition.latency_ms,
+        "idempotency_key": transition.idempotency_key,
+        "created_at": str(transition.created_at),
+        "actor": transition.actor,
+        "source": transition.source,
+    }
+
+
+def _serialize_artifact(artifact: AgentRunArtifact) -> dict[str, Any]:
+    return {
+        "id": artifact.id,
+        "step": artifact.step,
+        "payload": _coerce_dict(artifact.payload),
+        "evidence": _coerce_dict(artifact.evidence),
+        "attempt": artifact.attempt,
+        "latency_ms": artifact.latency_ms,
+        "actor": artifact.actor,
+        "source": artifact.source,
+        "created_at": str(artifact.created_at),
+        "transition_id": artifact.transition_id,
+        "score_history_id": artifact.score_history_id,
+    }
+
+
 def _coerce_rewrite_proposals_values(values: Any) -> list[dict[str, str]]:
     if not isinstance(values, list):
         return []
@@ -136,6 +242,7 @@ def _coerce_rewrite_proposals_values(values: Any) -> list[dict[str, str]]:
     return proposals
 
 
+
 def _coerce_string_items(values: Any) -> list[str]:
     if isinstance(values, list):
         return [str(item).strip() for item in values if str(item).strip()]
@@ -156,44 +263,64 @@ async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
     if not cv:
         raise HTTPException(400, "No CV uploaded. Please upload a CV first.")
 
-    try:
-        role_signal_map = await extract_role_signal_map(cv.parsed_text, req.job_description)
-    except Exception:
-        role_signal_map = {}
-    result = await score_cv_against_jd(cv.parsed_text, req.job_description, role_signal_map=role_signal_map)
-    try:
-        agent_plan = await generate_agent_score_plan(
-            cv_text=cv.parsed_text,
-            jd_text=req.job_description,
-            score_payload=result,
-            role_signal_map=role_signal_map,
-        )
-    except Exception:
-        agent_plan = _fallback_agent_plan(role_signal_map, result)
-
-    result["agent_plan"] = agent_plan
-
     settings = get_settings()
+    orchestrator_result = await execute_scoring_orchestrator(
+        db,
+        cv_id=cv.id,
+        cv_text=cv.parsed_text,
+        job_title=req.job_title,
+        company=req.company,
+        job_description=req.job_description,
+        actor="api.score",
+        source="api",
+    )
 
-    # Save to history if enabled
+    result = orchestrator_result.result
     if settings.save_history:
         entry = ScoreHistory(
             job_title=req.job_title,
             company=req.company,
             job_description=req.job_description,
-            fit_score=result["fit_score"],
-            matched_keywords=result["matched_keywords"],
-            missing_keywords=result["missing_keywords"],
-            gap_analysis=result["gap_analysis"],
-            rewrite_suggestions=result["rewrite_suggestions"],
-            agent_plan=result.get("agent_plan"),
+            fit_score=int(result["fit_score"]),
+            matched_keywords=_coerce_string_items(result.get("matched_keywords", [])),
+            missing_keywords=_coerce_string_items(result.get("missing_keywords", [])),
+            gap_analysis=_coerce_text(result.get("gap_analysis")),
+            rewrite_suggestions=_coerce_string_items(result.get("rewrite_suggestions", [])),
+            agent_plan=_coerce_dict(result.get("agent_plan")),
             llm_provider=settings.active_llm_provider,
             llm_model=_current_model(settings),
         )
         db.add(entry)
         db.commit()
         db.refresh(entry)
+
+        link_score_history_to_run(db, run_id=orchestrator_result.run_id, score_history_id=entry.id)
         result["id"] = entry.id
+
+    run, transitions, artifacts = get_run_timeline(db, orchestrator_result.run_id)
+    if run is None:
+        raise HTTPException(500, "Orchestrator run could not be loaded after execution")
+    run_payload = ScoreRunState(
+        id=run.id,
+        current_state=run.current_state,
+        status=run.status,
+        attempt_count=run.attempt_count,
+        failed_step=run.failed_step,
+        failure_reason=run.failure_reason,
+        created_at=str(run.created_at),
+        updated_at=str(run.updated_at),
+        completed_at=str(run.completed_at) if run.completed_at else None,
+        score_history_id=run.score_history_id,
+    )
+    result["run"] = run_payload
+    result["run_transitions"] = [_serialize_transition(item) for item in transitions]
+    result["run_artifacts"] = [_serialize_artifact(item) for item in artifacts]
+    result["run_id"] = orchestrator_result.run_id
+    result["run_state"] = orchestrator_result.current_state
+    result["run_status"] = orchestrator_result.status
+    result["run_attempt_count"] = run.attempt_count
+    result["run_error"] = run.failure_reason
+    result["agent_plan"] = _coerce_dict(result.get("agent_plan")) if not result.get("agent_plan") else result.get("agent_plan")
 
     result["llm_provider"] = settings.active_llm_provider
     result["llm_model"] = _current_model(settings)
@@ -244,6 +371,30 @@ async def rewrite_proposals(req: CVRewriteRequest, db: Session = Depends(get_db)
         company=req.company,
         llm_provider=settings.active_llm_provider,
         llm_model=_current_model(settings),
+    )
+
+
+@router.get("/runs/{run_id}", response_model=ScoreRunTimelineResponse)
+def get_run_timeline_endpoint(run_id: str, db: Session = Depends(get_db)):
+    run, transitions, artifacts = get_run_timeline(db, run_id=run_id)
+    if run is None:
+        raise HTTPException(404, "Run not found")
+
+    return ScoreRunTimelineResponse(
+        run=ScoreRunState(
+            id=run.id,
+            current_state=run.current_state,
+            status=run.status,
+            attempt_count=run.attempt_count,
+            failed_step=run.failed_step,
+            failure_reason=run.failure_reason,
+            created_at=str(run.created_at),
+            updated_at=str(run.updated_at),
+            completed_at=str(run.completed_at) if run.completed_at else None,
+            score_history_id=run.score_history_id,
+        ),
+        transitions=[_serialize_transition(item) for item in transitions],
+        artifacts=[_serialize_artifact(item) for item in artifacts],
     )
 
 

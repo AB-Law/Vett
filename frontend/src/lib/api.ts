@@ -56,6 +56,55 @@ export interface ScoreResult {
   company?: string
   llm_provider?: string
   llm_model?: string
+  run?: ScoreRun
+  run_transitions?: ScoreRunTransition[]
+  run_artifacts?: ScoreRunArtifact[]
+  run_id?: string
+  run_state?: string
+  run_status?: string
+  run_attempt_count?: number
+  run_error?: string
+}
+
+export interface ScoreRun {
+  id: string
+  current_state: string
+  status: string
+  attempt_count: number
+  failed_step: string | null
+  failure_reason: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  score_history_id: number | null
+}
+
+export interface ScoreRunTransition {
+  id: number
+  previous_state: string | null
+  next_state: string
+  trigger: string
+  attempt: number
+  failure_reason: string | null
+  latency_ms: number | null
+  idempotency_key: string
+  created_at: string
+  actor: string
+  source: string
+}
+
+export interface ScoreRunArtifact {
+  id: number
+  step: string
+  payload: Record<string, unknown> | null
+  evidence: Record<string, unknown> | null
+  attempt: number
+  latency_ms: number | null
+  actor: string
+  source: string
+  created_at: string
+  transition_id: number | null
+  score_history_id: number | null
 }
 
 export interface ScoreAgentPlan {
