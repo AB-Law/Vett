@@ -14,6 +14,8 @@ import { getJobs, searchJobs, getRescoreStatus, rescoreJobs, type Job } from '..
 import { scoreColor, formatDate } from '../lib/utils'
 import toast from 'react-hot-toast'
 
+type JobSortField = 'title' | 'company' | 'location' | 'score' | 'source' | 'posted_at'
+
 export default function Jobs() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [loading, setLoading] = useState(true)
@@ -158,7 +160,9 @@ export default function Jobs() {
 
       if (!res.run_id || res.total_jobs === 0) {
         await reloadJobs()
-        toast.info(res.message || `No jobs matched the selected filters.`)
+        toast(res.message || 'No jobs matched the selected filters.', {
+          position: 'top-right',
+        })
         setRescoring(false)
         setRescoreRunId(null)
         return
@@ -397,16 +401,18 @@ export default function Jobs() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50 border-b border-border">
-                  {[
-                    { label: 'Job Title', key: 'title' as const },
-                    { label: 'Company', key: 'company' as const },
-                    { label: 'Location', key: 'location' as const },
-                    { label: 'Score', key: 'score' as const },
-                    { label: 'Source', key: 'source' as const },
-                    { label: 'Posted', key: 'posted_at' as const },
-                    { label: '', key: null as const },
-                  ].map((h) => {
-                    if (!h.key) {
+                  {(
+                    [
+                      { label: 'Job Title', key: 'title' },
+                      { label: 'Company', key: 'company' },
+                      { label: 'Location', key: 'location' },
+                      { label: 'Score', key: 'score' },
+                      { label: 'Source', key: 'source' },
+                      { label: 'Posted', key: 'posted_at' },
+                      { label: '', key: null },
+                    ] as { label: string; key: JobSortField | null }[]
+                  ).map((h) => {
+                    if (h.key === null) {
                       return <th key={h.label} className="text-left px-4 py-3 text-text-muted font-medium text-xs uppercase tracking-wide" />
                     }
                     return (
