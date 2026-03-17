@@ -1,3 +1,4 @@
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 from pathlib import Path
@@ -45,9 +46,13 @@ class Settings(BaseSettings):
     practice_embedding_model: str = "text-embedding-3-small"
     practice_embedding_dim: int = 1536  # set to 1024 for nomic-embed-text / mxbai-embed-large
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    # Local-context tooling
+    local_context_environment: str = "dev"
+
+    model_config = ConfigDict(
+        env_file=".env",
+        extra="ignore",
+    )
 
 
 @lru_cache()

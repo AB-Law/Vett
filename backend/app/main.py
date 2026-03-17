@@ -15,6 +15,7 @@ from .routers import score as score_router
 from .routers import settings as settings_router
 from .routers import jobs as jobs_router
 from .routers import practice as practice_router
+from .routers import local_context as local_context_router
 from .services.practice_embedder import run_embedding_worker
 
 logger = logging.getLogger(__name__)
@@ -243,6 +244,43 @@ def _backfill_agent_runs_from_score_history() -> None:
             db.commit()
 
 
+def _ensure_local_context_tool_call_columns() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "local_context_tool_calls" not in table_names:
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("local_context_tool_calls")}
+    expected_columns = OrderedDict(
+        [
+            ("request_uuid", "VARCHAR(36)"),
+            ("tool_name", "VARCHAR(80)"),
+            ("model_id", "VARCHAR(120)"),
+            ("actor_role", "VARCHAR(64)"),
+            ("environment", "VARCHAR(32)"),
+            ("request_source", "VARCHAR(64)"),
+            ("session_id", "VARCHAR(255)"),
+            ("user_id", "VARCHAR(255)"),
+            ("input_hash", "VARCHAR(64)"),
+            ("result_hash", "VARCHAR(64)"),
+            ("latency_ms", "DOUBLE PRECISION"),
+            ("status", "VARCHAR(24)"),
+            ("decision_rationale", "JSON"),
+            ("error_message", "TEXT"),
+            ("input_payload", "JSON"),
+            ("output_payload", "JSON"),
+        ]
+    )
+
+    with engine.begin() as connection:
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing_columns:
+                continue
+            connection.execute(
+                text(f'ALTER TABLE "local_context_tool_calls" ADD COLUMN "{column_name}" {column_type};')
+            )
+
+
 def _ensure_pgvector_extension(connection: object) -> None:
     from sqlalchemy import text as sa_text
     connection.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector;"))
@@ -305,6 +343,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             Base.metadata.create_all(bind=engine)
             _ensure_jobs_columns()
             _ensure_score_history_columns()
+            _ensure_local_context_tool_call_columns()
             _backfill_agent_runs_from_score_history()
             _ensure_practice_questions_columns()
             _ensure_pgvector_index()
@@ -344,6 +383,7 @@ app.include_router(score_router.router, prefix="/api")
 app.include_router(settings_router.router, prefix="/api")
 app.include_router(jobs_router.router, prefix="/api")
 app.include_router(practice_router.router, prefix="/api")
+app.include_router(local_context_router.router, prefix="/api")
 
 
 @app.on_event("startup")
