@@ -6,7 +6,12 @@ from typing import Any, Optional
 from ..database import get_db
 from ..models.cv import CV
 from ..models.score import ScoreHistory
-from ..services.llm import extract_role_signal_map, generate_agent_score_plan, score_cv_against_jd
+from ..services.llm import (
+    extract_role_signal_map,
+    generate_agent_score_plan,
+    generate_cv_rewrite_proposals,
+    score_cv_against_jd,
+)
 from ..config import get_settings
 
 router = APIRouter(prefix="/score", tags=["score"])
@@ -40,6 +45,27 @@ class ScoreResponse(BaseModel):
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
     agent_plan: Optional[AgentPlan] = None
+
+
+class RewriteProposal(BaseModel):
+    before: str
+    after: str
+    reason: str
+    risk_or_uncertainty: str
+
+
+class CVRewriteRequest(BaseModel):
+    job_description: str
+    job_title: Optional[str] = None
+    company: Optional[str] = None
+
+
+class CVRewriteResponse(BaseModel):
+    proposals: list[RewriteProposal]
+    job_title: Optional[str] = None
+    company: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
 
 
 class HistoryItem(BaseModel):
@@ -84,6 +110,31 @@ def _fallback_agent_plan(
             "Run one mock interview with those topics in sequence",
         ],
     }
+
+
+def _coerce_rewrite_proposals_values(values: Any) -> list[dict[str, str]]:
+    if not isinstance(values, list):
+        return []
+
+    proposals: list[dict[str, str]] = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        before = str(item.get("before", "")).strip()
+        after = str(item.get("after", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        risk_or_uncertainty = str(item.get("risk_or_uncertainty", "")).strip()
+        if not before or not after or not reason or not risk_or_uncertainty:
+            continue
+        proposals.append(
+            {
+                "before": before,
+                "after": after,
+                "reason": reason,
+                "risk_or_uncertainty": risk_or_uncertainty,
+            }
+        )
+    return proposals
 
 
 def _coerce_string_items(values: Any) -> list[str]:
@@ -151,6 +202,50 @@ async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
     result.setdefault("company", req.company)
 
     return ScoreResponse(**result)
+
+
+@router.post("/rewrite-proposals", response_model=CVRewriteResponse)
+async def rewrite_proposals(req: CVRewriteRequest, db: Session = Depends(get_db)):
+    cv = db.query(CV).order_by(CV.id.desc()).first()
+    if not cv:
+        raise HTTPException(400, "No CV uploaded. Please upload a CV first.")
+
+    try:
+        role_signal_map = await extract_role_signal_map(cv.parsed_text, req.job_description)
+    except Exception:
+        role_signal_map = {}
+
+    try:
+        score_payload = await score_cv_against_jd(cv.parsed_text, req.job_description, role_signal_map=role_signal_map)
+    except Exception:
+        score_payload = {}
+
+    try:
+        proposals = await generate_cv_rewrite_proposals(
+            cv_text=cv.parsed_text,
+            jd_text=req.job_description,
+            role_signal_map=role_signal_map,
+            score_payload=score_payload,
+        )
+        proposals = _coerce_rewrite_proposals_values(proposals)
+    except Exception:
+        proposals = [
+            {
+                "before": "Could not generate a structured rewrite proposal.",
+                "after": "Retry after checking LLM connectivity and credentials.",
+                "reason": "Agent execution failed during proposal generation.",
+                "risk_or_uncertainty": "High risk of no-op if provider response is unavailable.",
+            }
+        ]
+
+    settings = get_settings()
+    return CVRewriteResponse(
+        proposals=proposals,
+        job_title=req.job_title,
+        company=req.company,
+        llm_provider=settings.active_llm_provider,
+        llm_model=_current_model(settings),
+    )
 
 
 @router.get("/history", response_model=list[HistoryItem])
