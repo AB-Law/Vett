@@ -47,6 +47,7 @@ def _ensure_jobs_columns() -> None:
             ("job_poster_name", "VARCHAR(255)"),
             ("job_poster_title", "VARCHAR(255)"),
             ("job_poster_profile_url", "TEXT"),
+            ("reason", "TEXT"),
         ]
     )
 
@@ -73,6 +74,7 @@ def _ensure_score_history_columns() -> None:
 
     existing_columns = {column["name"] for column in inspector.get_columns("score_history")}
     expected_columns = OrderedDict([
+        ("reason", "TEXT"),
         ("agent_plan", "JSON"),
         ("matched_keyword_evidence", "JSON"),
         ("missing_keyword_evidence", "JSON"),
@@ -144,6 +146,7 @@ def _backfill_agent_runs_from_score_history() -> None:
                     "matched_keywords": row.matched_keywords or [],
                     "missing_keywords": row.missing_keywords or [],
                     "gap_analysis": row.gap_analysis or "",
+                    "reason": row.reason or "",
                     "rewrite_suggestions": row.rewrite_suggestions or [],
                 }
                 run_transition = AgentRunTransition(

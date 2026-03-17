@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle } from 'lucide-react'
+import { ArrowLeft, AlertCircle, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import {
@@ -394,6 +394,16 @@ export default function JobDetails() {
               <span className="text-xs font-semibold text-text-primary">Gap Analysis</span>
             </div>
             <p className="text-xs text-text-secondary leading-relaxed">{job.gap_analysis}</p>
+          </div>
+        )}
+
+        {job.reason && (
+          <div className="mb-3">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <AlertCircle className="w-3.5 h-3.5 text-text-secondary" />
+              <span className="text-xs font-semibold text-text-primary">Why this score</span>
+            </div>
+            <p className="text-xs text-text-secondary leading-relaxed">{job.reason}</p>
           </div>
         )}
 

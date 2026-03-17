@@ -54,6 +54,7 @@ export interface ScoreResult {
   matched_keyword_evidence: ScoreEvidenceRecord[]
   missing_keyword_evidence: ScoreEvidenceRecord[]
   rewrite_suggestion_evidence: ScoreEvidenceRecord[]
+  reason?: string
   agent_plan?: ScoreAgentPlan
   job_title?: string
   company?: string
@@ -260,6 +261,7 @@ export interface Job {
   matched_keywords?: string[]
   missing_keywords?: string[]
   gap_analysis?: string
+  reason?: string
   created_at: string
 }
 
