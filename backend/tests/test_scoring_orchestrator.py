@@ -499,3 +499,144 @@ def test_rescore_run_marks_job_failed_when_orchestrator_fails(monkeypatch):
     assert run.failed_count == 1
     assert run.failed_job_ids == [13]
     verify.close()
+
+
+def test_scoring_stage_critic_retries_once_and_completes(monkeypatch):
+    Session = _make_session_factory()
+    db = Session()
+    _seed_cv(db)
+
+    scoring_calls = {"count": 0}
+
+    async def fake_role_analysis(cv_text, jd_text):
+        return {"role_summary": "backend"}, {}
+
+    async def fake_evidence_scan(cv_text, jd_text, role_signal_map):
+        return {"top_responsibilities": ["Build APIs"], "top_skills": ["Python"], "experience_signals": ["5+ years"]}, {}
+
+    async def fake_scoring_plan(cv_text, jd_text, role_signal_map):
+        return {
+            "missing_keyword_hypotheses": ["kubernetes", "observability"],
+            "score_schema_fields": [
+                "fit_score",
+                "matched_keywords",
+                "missing_keywords",
+                "gap_analysis",
+                "rewrite_suggestions",
+            ],
+        }
+
+    async def fake_scoring_executor(cv_text, jd_text, role_signal_map, scoring_plan):
+        scoring_calls["count"] += 1
+        if scoring_calls["count"] == 1:
+            return {
+                "fit_score": 88,
+                "matched_keywords": ["python", "api"],
+                "missing_keywords": ["kubernetes"],
+                "gap_analysis": "Focus on API stability and deployment.",
+                "rewrite_suggestions": ["Add stronger observability notes."],
+            }
+        return {
+            "fit_score": 89,
+            "matched_keywords": ["python", "api"],
+            "missing_keywords": ["kubernetes", "observability"],
+            "gap_analysis": "Gap analysis identifies missing Kubernetes and observability skills.",
+            "rewrite_suggestions": ["Add stronger observability notes."],
+        }
+
+    async def fake_gap_audit(role_signal_map, score_payload):
+        return {"gaps_to_address": ["kubernetes", "observability"]}, {}
+
+    async def fake_action_plan(cv_text, jd_text, score_payload, role_signal_map):
+        return {"skills_to_fix_first": ["kubernetes", "observability"]}, {}
+
+    def fake_rewrite_plan(score_payload):
+        return {"rewrite_suggestions": ["Quantify delivery metrics"]}, {}
+
+    monkeypatch.setattr(orchestrator, "_run_role_analysis_step", fake_role_analysis)
+    monkeypatch.setattr(orchestrator, "_run_evidence_scan_step", fake_evidence_scan)
+    monkeypatch.setattr(orchestrator, "_run_scoring_planner_step", fake_scoring_plan)
+    monkeypatch.setattr(orchestrator, "_run_scoring_execution_step", fake_scoring_executor)
+    monkeypatch.setattr(orchestrator, "_run_gap_audit_step", fake_gap_audit)
+    monkeypatch.setattr(orchestrator, "_run_action_plan_step", fake_action_plan)
+    monkeypatch.setattr(orchestrator, "_run_rewrite_plan_step", fake_rewrite_plan)
+
+    result = asyncio.run(
+        orchestrator.execute_scoring_orchestrator(
+            db,
+            cv_id=1,
+            cv_text="Experienced backend engineer.",
+            job_title="Senior backend engineer",
+            company="Acme",
+            job_description="Build robust API services.",
+            actor="test",
+            source="api",
+            idempotency_key="critic-retry-key",
+        )
+    )
+
+    assert result.status == AGENT_STATE_COMPLETED
+    assert result.result["fit_score"] == 89
+    assert scoring_calls["count"] == 2
+
+    scoring_artifacts = [artifact for artifact in result.artifacts if artifact.step == AGENT_STATE_SCORING]
+    assert len(scoring_artifacts) == 1
+    assert scoring_artifacts[0].evidence["critic_retries"] == 1
+    assert "Gap analysis does not mention missing keyword 'kubernetes'." in scoring_artifacts[0].evidence["critic_feedback"]
+
+
+def test_scoring_stage_fails_after_critic_retry(monkeypatch):
+    Session = _make_session_factory()
+    db = Session()
+    _seed_cv(db)
+
+    scoring_calls = {"count": 0}
+
+    async def fake_role_analysis(cv_text, jd_text):
+        return {"role_summary": "backend"}, {}
+
+    async def fake_evidence_scan(cv_text, jd_text, role_signal_map):
+        return {"top_responsibilities": ["Build APIs"], "top_skills": ["Python"], "experience_signals": ["5+ years"]}, {}
+
+    async def fake_scoring_plan(cv_text, jd_text, role_signal_map):
+        return {"missing_keyword_hypotheses": ["kubernetes", "observability"]}
+
+    async def fake_scoring_executor(cv_text, jd_text, role_signal_map, scoring_plan):
+        scoring_calls["count"] += 1
+        return {
+            "fit_score": "not-a-number",
+            "matched_keywords": "python",
+            "missing_keywords": ["kubernetes"],
+            "gap_analysis": "Focus on leadership and quality.",
+            "rewrite_suggestions": ["Add stronger observability notes."],
+        }
+
+    monkeypatch.setattr(orchestrator, "_run_role_analysis_step", fake_role_analysis)
+    monkeypatch.setattr(orchestrator, "_run_evidence_scan_step", fake_evidence_scan)
+    monkeypatch.setattr(orchestrator, "_run_scoring_planner_step", fake_scoring_plan)
+    monkeypatch.setattr(orchestrator, "_run_scoring_execution_step", fake_scoring_executor)
+
+    result = asyncio.run(
+        orchestrator.execute_scoring_orchestrator(
+            db,
+            cv_id=1,
+            cv_text="Experienced backend engineer.",
+            job_title="Senior backend engineer",
+            company="Acme",
+            job_description="Build robust API services.",
+            actor="test",
+            source="api",
+            idempotency_key="critic-fail-key",
+        )
+    )
+
+    assert result.status == AGENT_STATE_FAILED
+    assert result.current_state == AGENT_STATE_SCORING
+    assert scoring_calls["count"] == 2
+    assert result.result["fit_score"] == 0
+
+    run, transitions, artifacts = orchestrator.get_run_timeline(db, result.run_id)
+    assert run is not None
+    assert run.failed_step == AGENT_STATE_SCORING
+    assert len([item for item in transitions if item.next_state == AGENT_STATE_FAILED]) == 1
+    assert len([artifact for artifact in artifacts if artifact.step == AGENT_STATE_SCORING]) == 0
