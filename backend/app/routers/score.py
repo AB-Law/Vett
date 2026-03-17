@@ -40,6 +40,21 @@ class AgentPlan(BaseModel):
     study_order: list[str] = Field(default_factory=list)
 
 
+class EvidenceCitation(BaseModel):
+    section_id: str | None = None
+    phrase_id: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    snippet: str | None = None
+
+
+class ScoreEvidenceRecord(BaseModel):
+    value: str
+    cv_citations: list[EvidenceCitation] = Field(default_factory=list)
+    jd_phrase_citations: list[EvidenceCitation] = Field(default_factory=list)
+    evidence_missing_reason: str | None = None
+
+
 class ScoreResponse(BaseModel):
     id: Optional[int] = None
     fit_score: float
@@ -47,6 +62,9 @@ class ScoreResponse(BaseModel):
     missing_keywords: list[str]
     gap_analysis: str
     rewrite_suggestions: list[str]
+    matched_keyword_evidence: list[ScoreEvidenceRecord] = Field(default_factory=list)
+    missing_keyword_evidence: list[ScoreEvidenceRecord] = Field(default_factory=list)
+    rewrite_suggestion_evidence: list[ScoreEvidenceRecord] = Field(default_factory=list)
     job_title: Optional[str] = None
     company: Optional[str] = None
     llm_provider: Optional[str] = None
@@ -140,6 +158,9 @@ class HistoryItem(BaseModel):
     missing_keywords: list[str]
     gap_analysis: Optional[str]
     rewrite_suggestions: list[str]
+    matched_keyword_evidence: list[ScoreEvidenceRecord] = Field(default_factory=list)
+    missing_keyword_evidence: list[ScoreEvidenceRecord] = Field(default_factory=list)
+    rewrite_suggestion_evidence: list[ScoreEvidenceRecord] = Field(default_factory=list)
     llm_provider: Optional[str]
     llm_model: Optional[str]
     created_at: str
@@ -183,6 +204,12 @@ def _coerce_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _coerce_evidence_records(values: Any) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    return [row for row in values if isinstance(row, dict)]
 
 
 def _serialize_transition(transition: AgentRunTransition) -> dict[str, Any]:
@@ -284,6 +311,9 @@ async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
             fit_score=int(result["fit_score"]),
             matched_keywords=_coerce_string_items(result.get("matched_keywords", [])),
             missing_keywords=_coerce_string_items(result.get("missing_keywords", [])),
+            matched_keyword_evidence=_coerce_evidence_records(result.get("matched_keyword_evidence")),
+            missing_keyword_evidence=_coerce_evidence_records(result.get("missing_keyword_evidence")),
+            rewrite_suggestion_evidence=_coerce_evidence_records(result.get("rewrite_suggestion_evidence")),
             gap_analysis=_coerce_text(result.get("gap_analysis")),
             rewrite_suggestions=_coerce_string_items(result.get("rewrite_suggestions", [])),
             agent_plan=_coerce_dict(result.get("agent_plan")),
@@ -321,6 +351,9 @@ async def score_jd(req: ScoreRequest, db: Session = Depends(get_db)):
     result["run_attempt_count"] = run.attempt_count
     result["run_error"] = run.failure_reason
     result["agent_plan"] = _coerce_dict(result.get("agent_plan")) if not result.get("agent_plan") else result.get("agent_plan")
+    result["matched_keyword_evidence"] = _coerce_evidence_records(result.get("matched_keyword_evidence"))
+    result["missing_keyword_evidence"] = _coerce_evidence_records(result.get("missing_keyword_evidence"))
+    result["rewrite_suggestion_evidence"] = _coerce_evidence_records(result.get("rewrite_suggestion_evidence"))
 
     result["llm_provider"] = settings.active_llm_provider
     result["llm_model"] = _current_model(settings)
@@ -417,6 +450,9 @@ def get_history(db: Session = Depends(get_db)):
             missing_keywords=i.missing_keywords or [],
             gap_analysis=i.gap_analysis,
             rewrite_suggestions=i.rewrite_suggestions or [],
+            matched_keyword_evidence=i.matched_keyword_evidence or [],
+            missing_keyword_evidence=i.missing_keyword_evidence or [],
+            rewrite_suggestion_evidence=i.rewrite_suggestion_evidence or [],
             llm_provider=i.llm_provider,
             llm_model=i.llm_model,
             created_at=str(i.created_at),

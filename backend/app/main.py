@@ -72,7 +72,12 @@ def _ensure_score_history_columns() -> None:
         return
 
     existing_columns = {column["name"] for column in inspector.get_columns("score_history")}
-    expected_columns = OrderedDict([("agent_plan", "JSON")])
+    expected_columns = OrderedDict([
+        ("agent_plan", "JSON"),
+        ("matched_keyword_evidence", "JSON"),
+        ("missing_keyword_evidence", "JSON"),
+        ("rewrite_suggestion_evidence", "JSON"),
+    ])
 
     with engine.begin() as connection:
         for column_name, column_type in expected_columns.items():

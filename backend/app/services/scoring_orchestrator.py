@@ -76,6 +76,12 @@ def _coerce_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _coerce_evidence_records(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    return []
+
+
 def _normalize_request_key(
     *,
     cv_id: int,
@@ -111,6 +117,9 @@ def _coerce_score_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "missing_keywords": _coerce_list(payload.get("missing_keywords")),
         "gap_analysis": _coerce_text(payload.get("gap_analysis")),
         "rewrite_suggestions": _coerce_list(payload.get("rewrite_suggestions")),
+        "matched_keyword_evidence": _coerce_evidence_records(payload.get("matched_keyword_evidence")),
+        "missing_keyword_evidence": _coerce_evidence_records(payload.get("missing_keyword_evidence")),
+        "rewrite_suggestion_evidence": _coerce_evidence_records(payload.get("rewrite_suggestion_evidence")),
     }
 
 
