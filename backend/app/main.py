@@ -11,13 +11,14 @@ sa_text = text
 from sqlalchemy.exc import OperationalError
 
 from .database import Base, SessionLocal, engine
-from .models import cv, practice, score, user_profile  # noqa: F401 – register models
+from .models import cv, interview_chat, practice, score, user_profile  # noqa: F401 – register models
 from .routers import cv as cv_router
 from .routers import score as score_router
 from .routers import settings as settings_router
 from .routers import profile as profile_router
 from .routers import jobs as jobs_router
 from .routers import practice as practice_router
+from .routers import interview_chat as interview_chat_router
 from .routers import local_context as local_context_router
 from .services.practice_embedder import run_embedding_worker
 
@@ -500,6 +501,7 @@ app.include_router(settings_router.router, prefix="/api")
 app.include_router(profile_router.router, prefix="/api")
 app.include_router(jobs_router.router, prefix="/api")
 app.include_router(practice_router.router, prefix="/api")
+app.include_router(interview_chat_router.router, prefix="/api")
 app.include_router(local_context_router.router, prefix="/api")
 
 

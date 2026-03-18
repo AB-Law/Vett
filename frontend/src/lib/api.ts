@@ -349,6 +349,132 @@ export const cancelInterviewResearchSession = async (
 export const buildInterviewResearchStreamUrl = (jobId: number): string =>
   `/api/jobs/${jobId}/interview-research/stream`
 
+export interface InterviewChatToolCall {
+  tool: string
+  status: string
+  result_count: number
+  error?: string
+}
+
+export interface InterviewChatTurn {
+  id: number
+  turn_index: number
+  speaker: 'assistant' | 'user'
+  turn_type: 'question' | 'answer' | 'follow_up' | 'transition'
+  content: string
+  tool_calls: InterviewChatToolCall[]
+  context_sources: string[]
+  created_at: string
+}
+
+export interface InterviewChatSession {
+  session_id: string
+  label: string
+  status: string
+  phase: string
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  turn_count: number
+  handoff_run_id: string | null
+}
+
+export interface InterviewChatSessionDetail extends InterviewChatSession {
+  job_id: number
+  turns: InterviewChatTurn[]
+}
+
+export const listInterviewChatSessions = async (jobId: number): Promise<InterviewChatSession[]> => {
+  const { data } = await api.get<InterviewChatSession[]>(`/interview-chat/jobs/${jobId}/sessions`)
+  return data
+}
+
+export const createOrResumeInterviewChatSession = async (jobId: number): Promise<InterviewChatSessionDetail> => {
+  const { data } = await api.post<{ session: InterviewChatSessionDetail }>(`/interview-chat/jobs/${jobId}/sessions`)
+  return data.session
+}
+
+export const getInterviewChatSession = async (jobId: number, sessionId: string): Promise<InterviewChatSessionDetail> => {
+  const { data } = await api.get<InterviewChatSessionDetail>(`/interview-chat/jobs/${jobId}/sessions/${sessionId}`)
+  return data
+}
+
+export type InterviewChatStreamResult = {
+  message: string
+  phase: string
+  turn_types: string[]
+  tool_calls: InterviewChatToolCall[]
+  context_sources: string[]
+}
+
+export const streamInterviewChatTurn = async (
+  jobId: number,
+  sessionId: string,
+  message: string | null,
+  onToken: (token: string) => void,
+): Promise<InterviewChatStreamResult> => {
+  const response = await fetch(`/api/interview-chat/jobs/${jobId}/sessions/${sessionId}/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`Interview stream failed (${response.status})`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let donePayload: InterviewChatStreamResult | null = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() ?? ''
+    for (const block of blocks) {
+      if (!block.startsWith('data: ')) continue
+      const payload = JSON.parse(block.slice(6)) as {
+        type?: string
+        delta?: string
+        message?: string
+        phase?: string
+        turn_types?: string[]
+        tool_calls?: InterviewChatToolCall[]
+        context_sources?: string[]
+      }
+      if (payload.type === 'token' && payload.delta) {
+        onToken(payload.delta)
+      }
+      if (payload.type === 'done') {
+        donePayload = {
+          message: payload.message || '',
+          phase: payload.phase || '',
+          turn_types: payload.turn_types || [],
+          tool_calls: payload.tool_calls || [],
+          context_sources: payload.context_sources || [],
+        }
+      }
+    }
+  }
+
+  if (!donePayload) {
+    throw new Error('Interview stream ended without completion payload')
+  }
+  return donePayload
+}
+
+export const endInterviewChatSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<{ session_id: string; status: string; handoff_status: string; handoff_run_id: string | null }> => {
+  const { data } = await api.post<{ session_id: string; status: string; handoff_status: string; handoff_run_id: string | null }>(
+    `/interview-chat/jobs/${jobId}/sessions/${sessionId}/end`,
+  )
+  return data
+}
+
 // ── Jobs (Phase 2) ────────────────────────────────────────────────────────────
 
 export interface Job {

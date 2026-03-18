@@ -773,16 +773,26 @@ export default function JobDetails() {
 
         {/* Deep analysis trigger */}
         <div className="mt-3 pt-3 border-t border-border">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <button
-              type="button"
-              onClick={() => void handlePrepInterview()}
-              disabled={prepInterviewLoading}
-              className="btn-primary flex items-center gap-2 text-xs py-1.5 px-3 disabled:opacity-60"
-            >
-              {prepInterviewLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-              {prepInterviewLoading ? 'Preparing interview questions…' : 'Prep Interview'}
-            </button>
+          <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handlePrepInterview()}
+                disabled={prepInterviewLoading}
+                className="btn-primary flex items-center gap-2 text-xs py-1.5 px-3 disabled:opacity-60"
+              >
+                {prepInterviewLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                {prepInterviewLoading ? 'Preparing interview questions…' : 'Prep Interview'}
+              </button>
+              {job?.id ? (
+                <Link
+                  to={`/jobs/${job.id}/interview-prep`}
+                  className="rounded border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 px-3 py-1.5 text-xs"
+                >
+                  Start Interview Prep
+                </Link>
+              ) : null}
+            </div>
             {prepInterviewLoading ? (
               <button
                 type="button"
