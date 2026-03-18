@@ -2,12 +2,24 @@
 import logging
 import json
 import re
+import asyncio
+import os
 from html import unescape
 from urllib.parse import urlparse
 from typing import Any
 from ..config import get_settings
 
 logger = logging.getLogger(__name__)
+
+_LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "3"))
+_LLM_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    global _LLM_SEMAPHORE
+    if _LLM_SEMAPHORE is None:
+        _LLM_SEMAPHORE = asyncio.Semaphore(_LLM_CONCURRENCY)
+    return _LLM_SEMAPHORE
 
 
 def _get_litellm_model() -> tuple[str, dict[str, Any]]:
@@ -204,6 +216,25 @@ Job Description:
 
 Role/Signal map:
 {role_signal_map}
+"""
+
+SCORE_FAST_PROMPT = """You are a resume screening assistant.
+
+Given the CV and job description below, return a quick fit assessment.
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "fit_score": <integer 0-100>,
+  "matched_keywords": [<up to 8 strings>],
+  "missing_keywords": [<up to 8 strings>],
+  "gap_analysis": "<1-2 sentence summary>"
+}}
+
+CV:
+{cv_text}
+
+Job Description:
+{jd_text}
 """
 
 CV_REWRITE_PROPOSAL_PROMPT = """
@@ -657,13 +688,14 @@ async def extract_role_signal_map(cv_text: str, jd_text: str) -> dict[str, str |
         jd_text=jd_text[:4000],
     )
 
-    response = await litellm.acompletion(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        max_tokens=1200,
-        **kwargs,
-    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=1200,
+            **kwargs,
+        )
     raw = response.choices[0].message.content.strip()
     match = _extract_first_json_object(raw)
     if match:
@@ -707,12 +739,13 @@ async def score_cv_against_jd(
         role_signal_map=role_signal_text,
     )
 
-    response = await litellm.acompletion(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        **kwargs,
-    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            **kwargs,
+        )
 
     raw = response.choices[0].message.content.strip()
 
@@ -721,6 +754,38 @@ async def score_cv_against_jd(
     if match:
         raw = match.group(0)
 
+    try:
+        data = json.loads(raw)
+    except Exception:
+        try:
+            data = json.loads(_sanitize_json_token_stream(raw))
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return _coerce_score_payload(data)
+
+
+async def score_cv_fast(cv_text: str, jd_text: str) -> dict:
+    """Single-call fast scoring for bulk operations. No role analysis, no critic."""
+    import litellm
+
+    model, kwargs = _get_litellm_model()
+    prompt = SCORE_FAST_PROMPT.format(
+        cv_text=cv_text[:4000],
+        jd_text=jd_text[:3000],
+    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            **kwargs,
+        )
+    raw = response.choices[0].message.content.strip()
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        raw = match.group(0)
     try:
         data = json.loads(raw)
     except Exception:
@@ -791,18 +856,19 @@ async def generate_agent_score_plan(
     map_text = json.dumps(safe_map, ensure_ascii=False) if safe_map else "No role/signal map available."
     score_text = json.dumps(_coerce_score_payload(score_payload), ensure_ascii=False)
 
-    response = await litellm.acompletion(
-        model=model,
-        messages=[{"role": "user", "content": AGENT_PLAN_PROMPT.format(
-            cv_text=cv_text[:6000],
-            jd_text=jd_text[:4000],
-            role_signal_map=map_text,
-            score_payload=score_text,
-        )}],
-        temperature=0.25,
-        max_tokens=1200,
-        **kwargs,
-    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": AGENT_PLAN_PROMPT.format(
+                cv_text=cv_text[:6000],
+                jd_text=jd_text[:4000],
+                role_signal_map=map_text,
+                score_payload=score_text,
+            )}],
+            temperature=0.25,
+            max_tokens=1200,
+            **kwargs,
+        )
 
     raw = response.choices[0].message.content.strip()
     match = _extract_first_json_object(raw)

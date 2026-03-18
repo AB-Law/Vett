@@ -440,11 +440,14 @@ async def _run_scoring_step(
         last_critic_feedback = critic_feedback
         if attempt >= SCORING_EXECUTOR_MAX_ATTEMPTS:
             logger.warning(
-                "Score payload did not fully satisfy critic after %s attempt(s); proceeding with best result. Issues: %s",
+                "Score payload did not fully satisfy critic after %s attempt(s). Issues: %s",
                 attempt,
                 "; ".join(critic_feedback),
             )
-            break
+            raise ValueError(
+                "Scoring output failed validator after "
+                f"{attempt} attempt(s): {('; '.join(critic_feedback))}"
+            )
         critic_retries += 1
         scoring_plan = _reconcile_scoring_plan_with_feedback(scoring_plan, critic_feedback)
 

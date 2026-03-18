@@ -337,6 +337,30 @@ export const getJob = async (id: number): Promise<Job> => {
   return data
 }
 
+export interface JobAnalysisResult {
+  job_id: number
+  run_id: string
+  run_status: string
+  run_state: string
+  fit_score?: number
+  matched_keywords: string[]
+  missing_keywords: string[]
+  gap_analysis?: string
+  reason?: string
+  rewrite_suggestions: string[]
+  matched_keyword_evidence: ScoreEvidenceRecord[]
+  missing_keyword_evidence: ScoreEvidenceRecord[]
+  rewrite_suggestion_evidence: ScoreEvidenceRecord[]
+  agent_plan?: ScoreAgentPlan
+  failure_reason?: string
+  failed_step?: string
+}
+
+export const analyzeJob = async (jobId: number): Promise<JobAnalysisResult> => {
+  const { data } = await api.post<JobAnalysisResult>(`/jobs/${jobId}/analyze`, {}, { timeout: 180000 })
+  return data
+}
+
 // ── Practice (Phase 1) ─────────────────────────────────────────────────────────
 export interface PracticeQuestion {
   id: number

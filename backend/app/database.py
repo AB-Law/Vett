@@ -18,7 +18,9 @@ if database_url.startswith("sqlite:///"):
         if db_directory:
             try:
                 os.makedirs(db_directory, exist_ok=True)
-            except PermissionError:
+            except OSError as exc:
+                if exc.errno not in {13, 30}:
+                    raise
                 # CI and container environments can block /data; fall back to a writable path.
                 fallback_dir = "/tmp/vett"
                 os.makedirs(fallback_dir, exist_ok=True)

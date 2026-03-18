@@ -5,6 +5,8 @@ import { isAxiosError } from 'axios'
 import {
   getJob,
   type Job,
+  analyzeJob,
+  type JobAnalysisResult,
   getPracticeQuestions,
   type PracticeQuestion,
   markPracticeQuestionSolved,
@@ -23,6 +25,56 @@ type ConstraintSettings = {
   complexity: string
   timePressureMinutes: string
   pattern: string
+}
+
+function CitationList({ citations, kind }: { citations: Array<{ section_id?: string; phrase_id?: string; line_start?: number; line_end?: number; snippet?: string }>; kind: 'cv' | 'jd' }) {
+  if (!citations || citations.length === 0) return null
+  return (
+    <div className="mt-1 space-y-1">
+      {citations.map((c, i) => (
+        <div key={i} className="rounded bg-surface-secondary border border-border px-2 py-1 text-[11px]">
+          <span className="font-medium text-text-secondary mr-1">
+            {kind === 'cv' ? `CV §${c.section_id || i + 1}` : `JD #${c.phrase_id || i + 1}`}
+          </span>
+          {(c.line_start || c.line_end) && (
+            <span className="text-text-muted mr-1">L{c.line_start}{c.line_end && c.line_end !== c.line_start ? `–${c.line_end}` : ''}</span>
+          )}
+          {c.snippet && <span className="italic text-text-primary">"{c.snippet}"</span>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function EvidenceBlock({ records, label }: { records: Array<{ value: string; cv_citations: any[]; jd_phrase_citations: any[]; evidence_missing_reason?: string }>; label: string }) {
+  if (!records || records.length === 0) return null
+  return (
+    <div className="mb-4">
+      <div className="text-xs font-semibold text-text-primary mb-2">{label}</div>
+      <div className="space-y-2">
+        {records.map((rec, i) => (
+          <div key={i} className="border border-border rounded p-2">
+            <div className="text-xs font-medium text-text-primary mb-1">"{rec.value}"</div>
+            {rec.cv_citations?.length > 0 && (
+              <div>
+                <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">CV evidence</div>
+                <CitationList citations={rec.cv_citations} kind="cv" />
+              </div>
+            )}
+            {rec.jd_phrase_citations?.length > 0 && (
+              <div className="mt-1">
+                <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">JD evidence</div>
+                <CitationList citations={rec.jd_phrase_citations} kind="jd" />
+              </div>
+            )}
+            {rec.evidence_missing_reason && (
+              <div className="text-[11px] text-amber-600 mt-1 italic">{rec.evidence_missing_reason}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 const difficultyTagClass = (difficulty: string): string => {
@@ -76,6 +128,10 @@ export default function JobDetails() {
     }
     return windowFilter
   }
+  const [analysisResult, setAnalysisResult] = useState<JobAnalysisResult | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analysisError, setAnalysisError] = useState('')
+
   const [constraints, setConstraints] = useState<ConstraintSettings>({
     difficultyDelta: 'same',
     language: '',
@@ -292,6 +348,24 @@ export default function JobDetails() {
     }
   }
 
+  const handleAnalyze = async (): Promise<void> => {
+    if (!job) return
+    setAnalyzing(true)
+    setAnalysisError('')
+    setAnalysisResult(null)
+    try {
+      const result = await analyzeJob(job.id)
+      setAnalysisResult(result)
+      // Refresh job to pick up updated fit_score etc
+      const updated = await getJob(job.id)
+      setJob(updated)
+    } catch {
+      setAnalysisError('Deep analysis failed. Please try again.')
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
   const updateConstraint = (key: keyof ConstraintSettings, value: string): void => {
     setConstraints((current) => ({ ...current, [key]: value }))
   }
@@ -404,6 +478,125 @@ export default function JobDetails() {
               <span className="text-xs font-semibold text-text-primary">Why this score</span>
             </div>
             <p className="text-xs text-text-secondary leading-relaxed">{job.reason}</p>
+          </div>
+        )}
+
+        {/* Deep analysis trigger */}
+        <div className="mt-3 pt-3 border-t border-border">
+          {!analysisResult && (
+            <button
+              type="button"
+              onClick={() => void handleAnalyze()}
+              disabled={analyzing}
+              className="btn-primary flex items-center gap-2 text-xs py-1.5 px-3 disabled:opacity-60"
+            >
+              {analyzing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+              {analyzing ? 'Running deep analysis…' : 'Run deep analysis'}
+            </button>
+          )}
+          {analyzing && (
+            <p className="text-xs text-text-muted mt-2">This may take 30–60 seconds. Role analysis → scoring → action plan.</p>
+          )}
+          {analysisError && (
+            <p className="text-xs text-red-500 mt-2">{analysisError}</p>
+          )}
+        </div>
+
+        {/* Deep analysis results */}
+        {analysisResult && (
+          <div className="mt-4 pt-3 border-t border-border space-y-4">
+            <div className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
+              <BookOpen className="w-3.5 h-3.5" />
+              Deep analysis results
+              <button
+                type="button"
+                onClick={() => void handleAnalyze()}
+                disabled={analyzing}
+                className="ml-auto text-[10px] text-text-muted hover:text-text-primary disabled:opacity-50"
+              >
+                {analyzing ? 'Re-running…' : 'Re-run'}
+              </button>
+            </div>
+
+            {/* Rewrite suggestions */}
+            {analysisResult.rewrite_suggestions?.length > 0 && (
+              <div>
+                <div className="text-xs font-semibold text-text-primary mb-1.5">Rewrite suggestions</div>
+                <ul className="space-y-1">
+                  {analysisResult.rewrite_suggestions.map((s, i) => (
+                    <li key={i} className="text-xs text-text-secondary flex gap-2">
+                      <span className="text-text-muted shrink-0">{i + 1}.</span>
+                      {s}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Agent plan */}
+            {analysisResult.agent_plan && (
+              <div>
+                <div className="text-xs font-semibold text-text-primary mb-1.5">Action plan</div>
+                {analysisResult.agent_plan.skills_to_fix_first?.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Skills to fix first</div>
+                    <div className="flex flex-wrap gap-1">
+                      {analysisResult.agent_plan.skills_to_fix_first.map((s: string, i: number) => (
+                        <span key={i} className="keyword-missing text-xs">{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {analysisResult.agent_plan.concrete_edit_actions?.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">CV edits</div>
+                    <ul className="space-y-1">
+                      {analysisResult.agent_plan.concrete_edit_actions.map((a: string, i: number) => (
+                        <li key={i} className="text-xs text-text-secondary flex gap-2">
+                          <span className="text-text-muted shrink-0">{i + 1}.</span>{a}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {analysisResult.agent_plan.interview_topics_to_prioritize?.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Interview topics</div>
+                    <div className="flex flex-wrap gap-1">
+                      {analysisResult.agent_plan.interview_topics_to_prioritize.map((t: string, i: number) => (
+                        <span key={i} className="keyword-matched text-xs">{t}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {analysisResult.agent_plan.study_order?.length > 0 && (
+                  <div>
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Study order</div>
+                    <ol className="space-y-0.5">
+                      {analysisResult.agent_plan.study_order.map((s: string, i: number) => (
+                        <li key={i} className="text-xs text-text-secondary flex gap-2">
+                          <span className="text-text-muted shrink-0 font-medium">{i + 1}.</span>{s}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Evidence sections */}
+            <EvidenceBlock
+              records={analysisResult.matched_keyword_evidence}
+              label="Matched keyword evidence"
+            />
+            <EvidenceBlock
+              records={analysisResult.missing_keyword_evidence}
+              label="Missing keyword evidence"
+            />
+            <EvidenceBlock
+              records={analysisResult.rewrite_suggestion_evidence}
+              label="Rewrite suggestion evidence"
+            />
           </div>
         )}
 

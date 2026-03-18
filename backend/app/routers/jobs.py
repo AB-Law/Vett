@@ -16,10 +16,12 @@ import json
 from ..scrapers.linkedin import scrape_linkedin
 from ..services.scoring_orchestrator import execute_scoring_orchestrator
 from ..services.scrape_storage import store_scrape_results
+from ..services.llm import score_cv_fast
 
 from ..database import SessionLocal, get_db
 from ..models.cv import CV
 from ..models.score import Job, RescoreRun, ScrapeRequest
+from ..models.score import AGENT_STATE_COMPLETED, AGENT_STATE_FAILED
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,25 @@ class JobRescoreResponse(BaseModel):
     failed_count: int
     failed_job_ids: list[int] = Field(default_factory=list)
     message: str
+
+
+class JobAnalysisResponse(BaseModel):
+    job_id: int
+    run_id: str
+    run_status: str
+    run_state: str
+    fit_score: Optional[float]
+    matched_keywords: list[str]
+    missing_keywords: list[str]
+    gap_analysis: Optional[str]
+    reason: Optional[str]
+    rewrite_suggestions: list[str]
+    matched_keyword_evidence: list[dict]
+    missing_keyword_evidence: list[dict]
+    rewrite_suggestion_evidence: list[dict]
+    agent_plan: Optional[dict]
+    failure_reason: Optional[str]
+    failed_step: Optional[str]
 
 
 _RESCORE_WORKER_LOCK = threading.Lock()
@@ -236,6 +257,70 @@ def _start_rescore_worker() -> None:
         _RESCORE_WORKER_STARTED = True
 
 
+async def _score_single_job_fast(
+    job_id: int,
+    cv_text: str,
+    run_id: str,
+) -> tuple[int, bool, str | None]:
+    """Score one job with fast single-call scoring. Returns (job_id, success, error_msg)."""
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job is None:
+            return job_id, False, "Job not found"
+        if not job.description:
+            return job_id, False, "No description"
+        try:
+            result = await score_cv_fast(cv_text, job.description)
+        except Exception as exc:
+            logger.warning(
+                "Fast scoring failed for job %s in run %s; falling back to orchestrator. %s",
+                job_id,
+                run_id,
+                exc,
+            )
+            cv = db.query(CV).order_by(CV.id.desc()).first()
+            if cv is None:
+                return job_id, False, "No CV uploaded."
+            orchestrator_result = await execute_scoring_orchestrator(
+                db,
+                cv_id=cv.id,
+                cv_text=cv.parsed_text or "",
+                job_title=job.title,
+                company=job.company,
+                job_description=job.description,
+                actor="rescore-worker",
+                source="rescore",
+                idempotency_key=f"{run_id}:job:{job_id}",
+            )
+            if orchestrator_result.status != AGENT_STATE_COMPLETED:
+                return (
+                    job_id,
+                    False,
+                    orchestrator_result.failure_reason
+                    or orchestrator_result.status
+                    or AGENT_STATE_FAILED,
+                )
+            result = orchestrator_result.result if isinstance(orchestrator_result.result, dict) else {}
+        fit_score = result.get("fit_score", 0)
+        matched = result.get("matched_keywords", [])
+        missing = result.get("missing_keywords", [])
+        gap = result.get("gap_analysis", "")
+        job.fit_score = fit_score
+        job.matched_keywords = matched if isinstance(matched, list) else []
+        job.missing_keywords = missing if isinstance(missing, list) else []
+        job.gap_analysis = str(gap) if gap else ""
+        job.reason = ""
+        job.scored_at = datetime.utcnow()
+        db.commit()
+        return job_id, True, None
+    except Exception as exc:
+        logger.exception("Fast scoring failed for job %s in run %s", job_id, run_id)
+        return job_id, False, str(exc)
+    finally:
+        db.close()
+
+
 async def _process_rescore_run(run_id: str) -> None:
     db = SessionLocal()
     try:
@@ -275,126 +360,36 @@ async def _process_rescore_run(run_id: str) -> None:
         db.commit()
 
         failed_job_ids = _as_int_list(run.failed_job_ids)
-        for job in jobs:
+        job_ids = [job.id for job in jobs if job.description]
+        no_desc_ids = [job.id for job in jobs if not job.description]
+
+        for jid in no_desc_ids:
+            logger.warning("Run %s skipped job %s due to missing description.", run_id, jid)
+            if jid not in failed_job_ids:
+                failed_job_ids.append(jid)
+                run.failed_count += 1
             run.processed_jobs += 1
+        if no_desc_ids:
+            run.failed_job_ids = failed_job_ids
+            run.updated_at = datetime.utcnow()
+            db.commit()
 
-            if not job.description:
-                if job.id not in failed_job_ids:
-                    failed_job_ids.append(job.id)
-                    run.failed_count += 1
-                run.failed_job_ids = failed_job_ids
-                logger.warning(
-                    "Run %s skipped job %s due to missing description.",
-                    run_id,
-                    job.id,
-                )
-                run.message = (
-                    f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
-                    f"{run.scored_count} scored, {run.failed_count} failed."
-                )
-                run.updated_at = datetime.utcnow()
-                db.commit()
-                continue
-
-            try:
-                logger.debug(
-                    "Run %s scoring job %s (title=%r company=%r desc_len=%s preview=%r)",
-                    run_id,
-                    job.id,
-                    job.title,
-                    job.company,
-                    len(job.description or ""),
-                    _log_excerpt(job.description),
-                )
-                orchestrator_result = await execute_scoring_orchestrator(
-                    db,
-                    cv_id=cv.id,
-                    cv_text=cv.parsed_text,
-                    job_title=job.title,
-                    company=job.company,
-                    job_description=job.description,
-                    actor="jobs.rescore_worker",
-                    source="jobs",
-                    idempotency_key=f"jobs:{run_id}:job:{job.id}",
-                )
-            except Exception:
-                logger.exception(
-                    "Score execution failed for job %s in run %s",
-                    job.id,
-                    run_id,
-                )
-                if job.id not in failed_job_ids:
-                    failed_job_ids.append(job.id)
-                    run.failed_count += 1
-                run.failed_job_ids = failed_job_ids
-                run.message = (
-                    f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
-                    f"{run.scored_count} scored, {run.failed_count} failed."
-                )
-                run.updated_at = datetime.utcnow()
-                db.commit()
-                continue
-
-            if orchestrator_result.status == "failed":
-                failure_reason = getattr(orchestrator_result, "failure_reason", None)
-                failed_step = getattr(orchestrator_result, "failed_step", None)
-                logger.warning(
-                    "Orchestrator failed for job %s in run %s. failed_step=%r failure=%r",
-                    job.id,
-                    run_id,
-                    failed_step,
-                    failure_reason,
-                )
-                if job.id not in failed_job_ids:
-                    failed_job_ids.append(job.id)
-                    run.failed_count += 1
-                run.failed_job_ids = failed_job_ids
-                run.message = (
-                    f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
-                    f"{run.scored_count} scored, {run.failed_count} failed."
-                )
-                run.updated_at = datetime.utcnow()
-                db.commit()
-                continue
-
-            if not isinstance(orchestrator_result.result, dict):
-                logger.error(
-                    "Orchestrator result payload not dict for run=%s job=%s type=%s",
-                    run_id,
-                    job.id,
-                    type(orchestrator_result.result).__name__,
-                )
-                if job.id not in failed_job_ids:
-                    failed_job_ids.append(job.id)
-                    run.failed_count += 1
-                run.failed_job_ids = failed_job_ids
-                run.message = (
-                    f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
-                    f"{run.scored_count} scored, {run.failed_count} failed."
-                )
-                run.updated_at = datetime.utcnow()
-                db.commit()
-                continue
-
-            fit_score, matched_keywords, missing_keywords, gap_analysis, reason, _ = _result_score_fields(
-                orchestrator_result.result
+        chunk_size = 10
+        for i in range(0, len(job_ids), chunk_size):
+            chunk = job_ids[i:i + chunk_size]
+            results = await asyncio.gather(
+                *[_score_single_job_fast(jid, cv.parsed_text, run_id) for jid in chunk],
+                return_exceptions=False,
             )
-            job.fit_score = fit_score
-            job.matched_keywords = matched_keywords
-            job.missing_keywords = missing_keywords
-            job.gap_analysis = gap_analysis
-            job.reason = reason
-            job.scored_at = datetime.utcnow()
-
-            run.scored_count += 1
-            logger.debug(
-                "Run %s completed scoring job %s fit=%s matched=%s missing=%s",
-                run_id,
-                job.id,
-                fit_score,
-                len(matched_keywords),
-                len(missing_keywords),
-            )
+            for jid, success, _err in results:
+                run.processed_jobs += 1
+                if success:
+                    run.scored_count += 1
+                else:
+                    if jid not in failed_job_ids:
+                        failed_job_ids.append(jid)
+                    run.failed_count += 1
+            run.failed_job_ids = failed_job_ids
             run.message = (
                 f"Scoring in progress ({run.processed_jobs}/{run.total_jobs}). "
                 f"{run.scored_count} scored, {run.failed_count} failed."
@@ -740,6 +735,67 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
         gap_analysis=job.gap_analysis,
         reason=job.reason,
         created_at=str(job.created_at),
+    )
+
+
+@router.post("/{job_id}/analyze", response_model=JobAnalysisResponse)
+async def analyze_job(job_id: int, db: Session = Depends(get_db)):
+    from fastapi import HTTPException
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if not job.description:
+        raise HTTPException(400, "Job has no description to analyze")
+    cv = db.query(CV).order_by(CV.id.desc()).first()
+    if not cv:
+        raise HTTPException(400, "No CV uploaded")
+
+    result = await execute_scoring_orchestrator(
+        db,
+        cv_id=cv.id,
+        cv_text=cv.parsed_text,
+        job_title=job.title,
+        company=job.company,
+        job_description=job.description,
+        actor="jobs.analyze",
+        source="jobs",
+        idempotency_key=None,  # always fresh run
+    )
+
+    r = result.result
+    fit_score = r.get("fit_score")
+    matched = r.get("matched_keywords") or []
+    missing = r.get("missing_keywords") or []
+    gap = r.get("gap_analysis") or ""
+    reason = r.get("reason") or ""
+    rewrites = r.get("rewrite_suggestions") or []
+
+    # Persist the enriched fields back to the job
+    job.fit_score = fit_score
+    job.matched_keywords = matched if isinstance(matched, list) else []
+    job.missing_keywords = missing if isinstance(missing, list) else []
+    job.gap_analysis = str(gap) if gap else ""
+    job.reason = str(reason) if reason else ""
+    job.scored_at = datetime.utcnow()
+    db.commit()
+
+    return JobAnalysisResponse(
+        job_id=job_id,
+        run_id=result.run_id,
+        run_status=result.status,
+        run_state=result.current_state,
+        fit_score=fit_score,
+        matched_keywords=matched if isinstance(matched, list) else [],
+        missing_keywords=missing if isinstance(missing, list) else [],
+        gap_analysis=str(gap) if gap else None,
+        reason=str(reason) if reason else None,
+        rewrite_suggestions=rewrites if isinstance(rewrites, list) else [],
+        matched_keyword_evidence=r.get("matched_keyword_evidence") or [],
+        missing_keyword_evidence=r.get("missing_keyword_evidence") or [],
+        rewrite_suggestion_evidence=r.get("rewrite_suggestion_evidence") or [],
+        agent_plan=r.get("agent_plan"),
+        failure_reason=result.failure_reason,
+        failed_step=result.failed_step,
     )
 
 
