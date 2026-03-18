@@ -33,12 +33,23 @@ class SearXNGResult:
 class SearXNGClient:
     """Small async wrapper around a self-hosted SearXNG endpoint."""
 
-    def __init__(self, base_url: str, timeout_seconds: int = 8):
+    def __init__(self, base_url: str, timeout_seconds: int = 8, client_ip: str = "127.0.0.1"):
         base_url = (base_url or "").rstrip("/")
         if not base_url:
             raise SearchRequestError("SearXNG base URL is empty")
         self.base_url = base_url
         self.timeout_seconds = max(2, int(timeout_seconds))
+        self.client_ip = (client_ip or "127.0.0.1").strip() or "127.0.0.1"
+
+    def _request_headers(self) -> dict[str, str]:
+        return {
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
+            "X-Forwarded-For": self.client_ip,
+            "X-Real-IP": self.client_ip,
+            "X-Forwarded-Proto": "http",
+        }
 
     async def search(self, query: str, max_results: int = 5) -> list[SearXNGResult]:
         if not query:
@@ -56,14 +67,17 @@ class SearXNGClient:
         timeout = httpx.Timeout(self.timeout_seconds)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.get(url, params=params)
+                response = await client.get(url, params=params, headers=self._request_headers())
         except httpx.TimeoutException as exc:
             raise SearchRequestError(f"SearXNG search timed out: {exc}") from exc
         except httpx.RequestError as exc:
             raise SearchRequestError(f"SearXNG request failed: {exc}") from exc
 
         if response.status_code >= 400:
-            raise SearchRequestError(f"SearXNG request failed with HTTP {response.status_code}")
+            raise SearchRequestError(
+                f"SearXNG request failed with HTTP {response.status_code}: "
+                f"{response.text[:250].strip()}"
+            )
 
         try:
             payload = _SearchResponse.model_validate(response.json())

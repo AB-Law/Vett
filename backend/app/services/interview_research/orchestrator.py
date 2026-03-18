@@ -265,6 +265,32 @@ def _detect_distributed_topics(bank: InterviewResearchQuestionBank, role: str, c
     ]
 
 
+async def _run_search_stage(
+    stage: str,
+    role: str,
+    company: str,
+    emit: EMIT_FUNC,
+    timeout_seconds: int,
+    tool_call: Callable[[], Awaitable[list[dict[str, Any]]]],
+) -> tuple[list[dict[str, Any]], bool]:
+    try:
+        return await asyncio.wait_for(tool_call(), timeout=timeout_seconds), False
+    except Exception as exc:
+        logger.warning("Interview research stage '%s' failed: %s", stage, exc)
+        await _emit(
+            emit,
+            {
+                "type": "status",
+                "stage": stage,
+                "message": f"Stage '{stage}' failed; continuing with remaining steps.",
+                "role": role,
+                "company": company,
+                "error": str(exc),
+            },
+        )
+        return [], True
+
+
 def _coerce_as_payload(items: list[InterviewResearchQuestion]) -> list[dict[str, Any]]:
     return [
         {
@@ -316,30 +342,60 @@ async def run_interview_research(
         await emit_stage("initialized", f"Researching interview questions for {role} at {company}...")
         stage_timeout = max(2, run_context.timeout_seconds)
 
-        async def _run_with_timeout(coro):
-            return await asyncio.wait_for(coro, timeout=stage_timeout)
-
         await emit_stage("search_interview_questions", "Searching role-specific interview questions.")
-        question_hits = await _run_with_timeout(search_interview_questions(role=role, company=company, max_items=4))
+        question_hits, failed = await _run_search_stage(
+            "search_interview_questions",
+            role,
+            company,
+            emit,
+            stage_timeout,
+            lambda: search_interview_questions(role=role, company=company, max_items=4),
+        )
+        if failed:
+            fallback_used = True
         await _add_from_tool_output(bank, role, company, emit, "search_interview_questions", question_hits)
 
         await emit_stage("search_role_skills", "Searching commonly tested role skills.")
-        role_hits = await _run_with_timeout(search_role_skills(role=role, company=company, max_items=4))
+        role_hits, failed = await _run_search_stage(
+            "search_role_skills",
+            role,
+            company,
+            emit,
+            stage_timeout,
+            lambda: search_role_skills(role=role, company=company, max_items=4),
+        )
+        if failed:
+            fallback_used = True
         await _add_from_tool_output(bank, role, company, emit, "search_role_skills", role_hits)
 
         await emit_stage("search_company_engineering_culture", "Collecting company engineering context and culture clues.")
-        culture_hits = await _run_with_timeout(search_company_engineering_culture(company=company, role=role, max_items=4))
+        culture_hits, failed = await _run_search_stage(
+            "search_company_engineering_culture",
+            role,
+            company,
+            emit,
+            stage_timeout,
+            lambda: search_company_engineering_culture(company=company, role=role, max_items=4),
+        )
+        if failed:
+            fallback_used = True
         await _add_from_tool_output(bank, role, company, emit, "search_company_engineering_culture", culture_hits)
 
         expand_queries = _detect_distributed_topics(bank, role, company)
         if expand_queries and settings.searxng_enabled:
             for query in expand_queries:
                 await emit_stage("search_company_engineering_culture", f"Detected distributed systems signal, running expansion query: {query}")
-                try:
-                    hits = await _run_with_timeout(search_interview_questions(role=f"{query}", company=company, max_items=2))
-                    await _add_from_tool_output(bank, role, company, emit, "search_company_engineering_culture", hits)
-                except Exception as exc:
-                    logger.warning("Distributed systems expansion query failed: %s", exc)
+                hits, failed = await _run_search_stage(
+                    "search_company_engineering_culture",
+                    role,
+                    company,
+                    emit,
+                    stage_timeout,
+                    lambda q=query: search_interview_questions(role=f"{q}", company=company, max_items=2),
+                )
+                if failed:
+                    fallback_used = True
+                await _add_from_tool_output(bank, role, company, emit, "search_company_engineering_culture", hits)
 
         urls = _extract_expand_urls(question_hits + role_hits + culture_hits, limit=3)
         await _run_fetch_and_expand(bank, role, company, emit, "fetch_page", urls)
@@ -351,9 +407,7 @@ async def run_interview_research(
                 f"{role} technical questions and patterns",
             ]
             for query in vector_queries:
-                vector_hits = await _run_with_timeout(
-                    query_vector_store(db, query, job_id=run_context.job.id, max_items=3, fetch_limit=2)
-                )
+                vector_hits = await query_vector_store(db, query, job_id=run_context.job.id, max_items=3, fetch_limit=2)
                 await _add_from_tool_output(bank, role, company, emit, "query_vector_store", vector_hits)
                 await _run_fetch_and_expand(
                     bank,
@@ -376,6 +430,8 @@ async def run_interview_research(
                 "message": str(exc),
             })
 
+    if fallback_used and not message:
+        message = "Web research was partially unavailable; applied fallback question generation."
     _normalize_category_output(bank, role, company)
     final_payload = InterviewResearchResult(
         session_id="",

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     searxng_enabled: bool = True
     searxng_base_url: str = "http://searxng:8080"
     searxng_timeout_seconds: int = 8
+    searxng_client_ip: str = "127.0.0.1"
     interview_research_timeout_seconds: int = 20
 
     # Phase 2

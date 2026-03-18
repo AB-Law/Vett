@@ -105,7 +105,11 @@ async def search_interview_questions(role: str, company: str | None, *, max_item
     if not settings.searxng_enabled:
         return []
     query = build_interview_questions_query(role, company)
-    client = SearXNGClient(settings.searxng_base_url, timeout_seconds=settings.searxng_timeout_seconds)
+    client = SearXNGClient(
+        settings.searxng_base_url,
+        timeout_seconds=settings.searxng_timeout_seconds,
+        client_ip=settings.searxng_client_ip,
+    )
     results = await client.search(query, max_results=max_items)
     output: list[dict[str, str | float]] = []
     for idx, result in enumerate(results):
@@ -125,7 +129,11 @@ async def search_role_skills(role: str, company: str | None, *, max_items: int =
     if not settings.searxng_enabled:
         return []
     query = build_role_skills_query(role, company)
-    client = SearXNGClient(settings.searxng_base_url, timeout_seconds=settings.searxng_timeout_seconds)
+    client = SearXNGClient(
+        settings.searxng_base_url,
+        timeout_seconds=settings.searxng_timeout_seconds,
+        client_ip=settings.searxng_client_ip,
+    )
     results = await client.search(query, max_results=max_items)
     output: list[dict[str, str | float]] = []
     for idx, result in enumerate(results):
@@ -145,7 +153,11 @@ async def search_company_engineering_culture(company: str, role: str | None = No
     if not settings.searxng_enabled:
         return []
     query = build_company_culture_query(company, role)
-    client = SearXNGClient(settings.searxng_base_url, timeout_seconds=settings.searxng_timeout_seconds)
+    client = SearXNGClient(
+        settings.searxng_base_url,
+        timeout_seconds=settings.searxng_timeout_seconds,
+        client_ip=settings.searxng_client_ip,
+    )
     results = await client.search(query, max_results=max_items)
     output: list[dict[str, str | float]] = []
     for idx, result in enumerate(results):
