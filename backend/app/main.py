@@ -11,7 +11,7 @@ sa_text = text
 from sqlalchemy.exc import OperationalError
 
 from .database import Base, SessionLocal, engine
-from .models import cv, interview_chat, practice, score, user_profile  # noqa: F401 – register models
+from .models import cv, interview_chat, practice, score, user_profile  # noqa: F401 - register models
 from .routers import cv as cv_router
 from .routers import score as score_router
 from .routers import settings as settings_router
@@ -489,6 +489,36 @@ def _ensure_interview_chat_sessions_table() -> None:
                 )
             )
 
+
+def _ensure_interview_chat_turns_uniqueness() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_chat_turns" not in table_names:
+        return
+
+    with engine.begin() as connection:
+        # Keep the earliest row per (session_id, turn_index) before applying uniqueness.
+        connection.execute(
+            sa_text(
+                "DELETE FROM interview_chat_turns "
+                "WHERE id IN ("
+                "  SELECT t1.id "
+                "  FROM interview_chat_turns t1 "
+                "  JOIN interview_chat_turns t2 "
+                "    ON t1.session_id = t2.session_id "
+                "   AND t1.turn_index = t2.turn_index "
+                "   AND t1.id > t2.id"
+                ");"
+            )
+        )
+        connection.execute(
+            sa_text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uix_interviewchatturn_session_turn" '
+                'ON "interview_chat_turns" ("session_id", "turn_index");'
+            )
+        )
+
+
 def _ensure_pgvector_index() -> None:
     from sqlalchemy import text as sa_text
     with engine.begin() as conn:
@@ -514,6 +544,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_interview_documents_columns()
             _ensure_interview_research_sessions_table()
             _ensure_interview_chat_sessions_table()
+            _ensure_interview_chat_turns_uniqueness()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")
             return

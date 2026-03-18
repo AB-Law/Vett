@@ -1643,13 +1643,15 @@ async def generate_adaptive_interview_question(
         context_snippets=json.dumps((context_snippets or [])[:8], ensure_ascii=True),
     )
     try:
-        response = await litellm.acompletion(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.25,
-            max_tokens=320,
-            **kwargs,
-        )
+        semaphore = _get_llm_semaphore()
+        async with semaphore:
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.25,
+                max_tokens=320,
+                **kwargs,
+            )
         raw = _coerce_non_empty_string(response.choices[0].message.content)
     except Exception as exc:
         logger.warning("Adaptive interview question generation failed: %s", exc)
@@ -1660,7 +1662,7 @@ async def generate_adaptive_interview_question(
 
     match = _extract_first_json_object(raw)
     candidate = match or raw
-    parsed: dict[str, object] = {}
+    parsed: object = {}
     try:
         parsed = json.loads(candidate)
     except Exception:
@@ -1668,6 +1670,9 @@ async def generate_adaptive_interview_question(
             parsed = json.loads(_sanitize_json_token_stream(candidate))
         except Exception:
             return {"question": "", "rationale": ""}
+
+    if not isinstance(parsed, dict):
+        return {"question": "", "rationale": ""}
 
     question = _coerce_non_empty_string(parsed.get("question"))
     rationale = _coerce_non_empty_string(parsed.get("rationale"))

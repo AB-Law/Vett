@@ -187,59 +187,76 @@ async def stream_interview_turn(
     if session.status != "active":
         raise HTTPException(status_code=400, detail="Interview session is not active")
 
-    replies = await produce_assistant_reply(
-        db,
-        session=session,
-        job=job,
-        message=payload.message or "",
-    )
-    emitted_messages: list[str] = []
-    emitted_turn_types: list[str] = []
-    emitted_tool_calls: list[dict[str, object]] = []
-    emitted_context_sources: list[str] = []
+    queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
 
-    for reply in replies:
-        add_turn(
-            db,
-            session=session,
-            speaker="assistant",
-            turn_type=reply.turn_type,
-            content=reply.text,
-            tool_calls=reply.tool_calls,
-            context_sources=reply.context_sources,
-        )
-        emitted_messages.append(reply.text)
-        emitted_turn_types.append(reply.turn_type)
-        emitted_tool_calls.extend(reply.tool_calls)
-        emitted_context_sources.extend(reply.context_sources)
+    async def produce_events() -> None:
+        emitted_messages: list[str] = []
+        emitted_turn_types: list[str] = []
+        emitted_tool_calls: list[dict[str, object]] = []
+        emitted_context_sources: list[str] = []
+        try:
+            async for chunk in produce_assistant_reply(
+                db,
+                session=session,
+                job=job,
+                message=payload.message or "",
+            ):
+                if chunk.delta:
+                    await queue.put({"type": "token", "delta": chunk.delta})
+                if not chunk.is_final:
+                    continue
 
-    session.updated_at = datetime.utcnow()
-    db.add(session)
-    db.commit()
+                completed_message = chunk.full_text.strip()
+                if completed_message:
+                    add_turn(
+                        db,
+                        session=session,
+                        speaker="assistant",
+                        turn_type=chunk.turn_type,
+                        content=completed_message,
+                        tool_calls=chunk.tool_calls,
+                        context_sources=chunk.context_sources,
+                    )
+                    emitted_messages.append(completed_message)
+                    emitted_turn_types.append(chunk.turn_type)
+                    emitted_tool_calls.extend(chunk.tool_calls)
+                    emitted_context_sources.extend(chunk.context_sources)
 
-    full_message = "\n\n".join([msg for msg in emitted_messages if msg.strip()]).strip()
+            session.updated_at = datetime.utcnow()
+            db.add(session)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            await queue.put({"type": "error", "message": str(exc)})
+        finally:
+            full_message = "\n\n".join([msg for msg in emitted_messages if msg.strip()]).strip()
+            done_payload = {
+                "type": "done",
+                "session_id": session.session_id,
+                "message": full_message,
+                "turn_types": emitted_turn_types,
+                "tool_calls": emitted_tool_calls,
+                "context_sources": emitted_context_sources,
+                "phase": session.phase,
+                "preparation_status": (session.session_metadata or {}).get("preparation_status"),
+                "rolling_score": (session.session_metadata or {}).get("rolling_score"),
+                "thread_score_snapshot": (session.session_metadata or {}).get("thread_score_snapshot"),
+                "primary_question_count": int(session.current_question_index or 0),
+                "limits": (session.session_metadata or {}).get("limits"),
+            }
+            await queue.put(done_payload)
+            await queue.put(None)
+
+    producer_task = asyncio.create_task(produce_events())
 
     async def event_generator():
-        if full_message:
-            for token in full_message.split(" "):
-                if token:
-                    yield f"data: {json.dumps({'type': 'token', 'delta': f'{token} '})}\n\n"
-                await asyncio.sleep(0)
-        done_payload = {
-            "type": "done",
-            "session_id": session.session_id,
-            "message": full_message,
-            "turn_types": emitted_turn_types,
-            "tool_calls": emitted_tool_calls,
-            "context_sources": emitted_context_sources,
-            "phase": session.phase,
-            "preparation_status": (session.session_metadata or {}).get("preparation_status"),
-            "rolling_score": (session.session_metadata or {}).get("rolling_score"),
-            "thread_score_snapshot": (session.session_metadata or {}).get("thread_score_snapshot"),
-            "primary_question_count": int(session.current_question_index or 0),
-            "limits": (session.session_metadata or {}).get("limits"),
-        }
-        yield f"data: {json.dumps(done_payload)}\n\n"
+        while True:
+            payload_item = await queue.get()
+            if payload_item is None:
+                break
+            yield f"data: {json.dumps(payload_item)}\n\n"
+            await asyncio.sleep(0)
+        await producer_task
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

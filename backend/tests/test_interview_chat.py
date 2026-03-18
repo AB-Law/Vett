@@ -4,13 +4,22 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.database import Base
-from app.models.cv import CV
-from app.models.interview_chat import InterviewChatSession, InterviewChatTurn
-from app.models.interview_research import InterviewResearchSession
-from app.models.score import Job
-from app.routers import interview_chat as interview_chat_router
-from app.services import interview_chat_service
+try:
+    from backend.app.database import Base
+    from backend.app.models.cv import CV
+    from backend.app.models.interview_chat import InterviewChatSession, InterviewChatTurn
+    from backend.app.models.interview_research import InterviewResearchSession
+    from backend.app.models.score import Job
+    from backend.app.routers import interview_chat as interview_chat_router
+    from backend.app.services import interview_chat_service
+except ModuleNotFoundError:
+    from app.database import Base
+    from app.models.cv import CV
+    from app.models.interview_chat import InterviewChatSession, InterviewChatTurn
+    from app.models.interview_research import InterviewResearchSession
+    from app.models.score import Job
+    from app.routers import interview_chat as interview_chat_router
+    from app.services import interview_chat_service
 
 
 def _new_db_session():
@@ -27,6 +36,19 @@ def _parse_sse(payload: bytes | str) -> list[dict[str, object]]:
         if not line.startswith("data: "):
             continue
         events.append(json.loads(line.removeprefix("data: ")))
+    return events
+
+
+async def _stream_turn(db, job_id: int, session_id: str, message: str | None) -> list[dict[str, object]]:
+    response = await interview_chat_router.stream_interview_turn(
+        job_id,
+        session_id,
+        interview_chat_router.InterviewChatStreamRequest(message=message),
+        db=db,
+    )
+    events: list[dict[str, object]] = []
+    async for chunk in response.body_iterator:
+        events.extend(_parse_sse(chunk))
     return events
 
 
@@ -62,19 +84,11 @@ async def test_interview_chat_opening_and_category_order():
     create_result = interview_chat_router.create_or_resume_interview_session(job.id, db=db)
     assert create_result.session.job_id == job.id
 
-    stream_response = await interview_chat_router.stream_interview_turn(
-        job.id,
-        create_result.session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
-    stream_events: list[dict[str, object]] = []
-    async for chunk in stream_response.body_iterator:
-        stream_events.extend(_parse_sse(chunk))
+    stream_events = await _stream_turn(db, job.id, create_result.session.session_id, None)
     done_event = next(event for event in stream_events if event.get("type") == "done")
     assert "Backend Engineer" in str(done_event.get("message"))
     assert "Acme" in str(done_event.get("message"))
-    assert "Design a rate-limited notification service." in str(done_event.get("message"))
+    assert "Tell me about a conflict you resolved on a team." in str(done_event.get("message"))
     assert done_event.get("preparation_status") == "ready"
 
     detail = interview_chat_router.get_interview_session(job.id, create_result.session.session_id, db=db)
@@ -84,11 +98,11 @@ async def test_interview_chat_opening_and_category_order():
     assert detail.primary_question_count == 1
     assert detail.preparation_status == "ready"
 
-    await interview_chat_router.stream_interview_turn(
+    await _stream_turn(
+        db,
         job.id,
         create_result.session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message="I clarified goals, delegated owners, and reduced incident count by 40%."),
-        db=db,
+        "I clarified goals, delegated owners, and reduced incident count by 40%.",
     )
     session_row = (
         db.query(InterviewChatSession)
@@ -108,19 +122,9 @@ async def test_interview_chat_vague_answer_triggers_follow_up():
     db.refresh(job)
 
     session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
+    await _stream_turn(db, job.id, session.session_id, None)
 
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message="Not sure, maybe."),
-        db=db,
-    )
+    await _stream_turn(db, job.id, session.session_id, "Not sure, maybe.")
 
     turns = (
         db.query(InterviewChatTurn)
@@ -142,30 +146,15 @@ async def test_thread_guardrail_does_not_increment_primary_question_count_until_
     db.refresh(job)
 
     session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
+    await _stream_turn(db, job.id, session.session_id, None)
 
     for _ in range(5):
-        await interview_chat_router.stream_interview_turn(
-            job.id,
-            session.session_id,
-            interview_chat_router.InterviewChatStreamRequest(message="Not sure, maybe."),
-            db=db,
-        )
+        await _stream_turn(db, job.id, session.session_id, "Not sure, maybe.")
         row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
         assert row is not None
         assert row.current_question_index == 1
 
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message="Not sure, maybe."),
-        db=db,
-    )
+    await _stream_turn(db, job.id, session.session_id, "Not sure, maybe.")
     row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
     assert row is not None
     assert row.current_question_index == 2
@@ -180,19 +169,12 @@ async def test_thread_scoring_aggregates_whole_conversation():
     db.refresh(job)
 
     session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
-    await interview_chat_router.stream_interview_turn(
+    await _stream_turn(db, job.id, session.session_id, None)
+    await _stream_turn(
+        db,
         job.id,
         session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(
-            message="I led the migration, reduced latency by 32%, and handled rollback trade-offs with incident metrics.",
-        ),
-        db=db,
+        "I led the migration, reduced latency by 32%, and handled rollback trade-offs with incident metrics.",
     )
 
     row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
@@ -213,21 +195,14 @@ async def test_post_closing_message_does_not_reopen_primary_question_flow(monkey
     db.refresh(job)
 
     session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
+    await _stream_turn(db, job.id, session.session_id, None)
 
     monkeypatch.setattr(interview_chat_service, "_should_end_interview", lambda *_args, **_kwargs: True)
-    await interview_chat_router.stream_interview_turn(
+    await _stream_turn(
+        db,
         job.id,
         session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(
-            message="I led an incident review and reduced recurring failures by 35% through ownership and metrics.",
-        ),
-        db=db,
+        "I led an incident review and reduced recurring failures by 35% through ownership and metrics.",
     )
 
     row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
@@ -236,13 +211,11 @@ async def test_post_closing_message_does_not_reopen_primary_question_flow(monkey
     assert row.is_waiting_for_candidate_question is True
     assert row.current_question_index == 1
 
-    await interview_chat_router.stream_interview_turn(
+    await _stream_turn(
+        db,
         job.id,
         session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(
-            message="How does the team measure success for this role after onboarding?",
-        ),
-        db=db,
+        "How does the team measure success for this role after onboarding?",
     )
     row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
     assert row is not None
@@ -261,12 +234,7 @@ async def test_post_closing_message_does_not_reopen_primary_question_flow(monkey
         .count()
     )
 
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message="One more thing, thanks."),
-        db=db,
-    )
+    await _stream_turn(db, job.id, session.session_id, "One more thing, thanks.")
 
     row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
     assert row is not None
@@ -307,12 +275,7 @@ async def test_cross_session_question_dedup_avoids_repeat():
     db.refresh(job)
 
     first_session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        first_session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
+    await _stream_turn(db, job.id, first_session.session_id, None)
     first_question = (
         db.query(InterviewChatTurn)
         .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
@@ -329,12 +292,7 @@ async def test_cross_session_question_dedup_avoids_repeat():
     await interview_chat_router.end_interview_session(job.id, first_session.session_id, db=db)
 
     second_session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        second_session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
+    await _stream_turn(db, job.id, second_session.session_id, None)
     second_question = (
         db.query(InterviewChatTurn)
         .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
@@ -369,12 +327,7 @@ async def test_end_interview_triggers_story4_handoff(monkeypatch):
     monkeypatch.setattr(interview_chat_service, "execute_scoring_orchestrator", fake_execute_scoring_orchestrator)
 
     session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
-    await interview_chat_router.stream_interview_turn(
-        job.id,
-        session.session_id,
-        interview_chat_router.InterviewChatStreamRequest(message=None),
-        db=db,
-    )
+    await _stream_turn(db, job.id, session.session_id, None)
 
     result = await interview_chat_router.end_interview_session(job.id, session.session_id, db=db)
     assert result.status == "completed"

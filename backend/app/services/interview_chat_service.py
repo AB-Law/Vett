@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 import re
-from typing import Any, TypedDict, cast
+from typing import Any, AsyncIterator, TypedDict, cast
 
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,8 @@ from ..models.score import Job
 from .interview_docs import fetch_context_from_interview_documents
 from .llm import generate_adaptive_interview_question, generate_embedding
 from .scoring_orchestrator import execute_scoring_orchestrator
+
+logger = logging.getLogger(__name__)
 
 QUESTION_ORDER = ["behavioral", "technical", "system_design", "company_specific"]
 QUESTION_TARGETS = {"behavioral": 3, "technical": 4, "system_design": 2, "company_specific": 2}
@@ -38,6 +42,16 @@ class AssistantReply:
     turn_type: str
     tool_calls: list[dict[str, object]]
     context_sources: list[str]
+
+
+@dataclass
+class AssistantReplyChunk:
+    delta: str
+    full_text: str
+    turn_type: str
+    tool_calls: list[dict[str, object]]
+    context_sources: list[str]
+    is_final: bool
 
 
 def _clean(value: object) -> str:
@@ -615,16 +629,57 @@ def _store_thread(metadata: dict[str, Any], thread: ThreadState | None) -> None:
 def _choose_category(metadata: dict[str, Any]) -> str:
     counts_raw = metadata.get("category_counts") or {}
     counts: dict[str, int] = {category: int(counts_raw.get(category) or 0) for category in QUESTION_ORDER}
-    scores_raw = metadata.get("answer_scores") or []
-    recent = [float(item.get("score", 0)) for item in scores_raw[-3:] if isinstance(item, dict)]
-    rolling = sum(recent) / len(recent) if recent else None
-    dev_focus = bool(metadata.get("dev_focus"))
-    if dev_focus and (rolling is None or rolling >= 55) and counts["system_design"] <= counts["behavioral"]:
-        return "system_design"
-    if rolling is not None and rolling < 45 and counts["behavioral"] <= counts["technical"]:
-        return "behavioral"
-    ordered = sorted(QUESTION_ORDER, key=lambda cat: counts[cat])
-    return ordered[0]
+    # Deterministic progression in QUESTION_ORDER; do not reorder by score/count sorting.
+    for index, category in enumerate(QUESTION_ORDER[:-1]):
+        later_categories = QUESTION_ORDER[index + 1 :]
+        if later_categories and counts[category] < min(counts[name] for name in later_categories):
+            return category
+    min_count = min(counts.values()) if counts else 0
+    for category in QUESTION_ORDER:
+        if counts[category] == min_count:
+            return category
+    return QUESTION_ORDER[0]
+
+
+async def _stream_assistant_reply(reply: AssistantReply) -> AsyncIterator[AssistantReplyChunk]:
+    text = reply.text.strip()
+    if not text:
+        yield AssistantReplyChunk(
+            delta="",
+            full_text="",
+            turn_type=reply.turn_type,
+            tool_calls=reply.tool_calls,
+            context_sources=reply.context_sources,
+            is_final=True,
+        )
+        return
+
+    pieces = [token for token in text.split(" ") if token]
+    if not pieces:
+        yield AssistantReplyChunk(
+            delta=text,
+            full_text=text,
+            turn_type=reply.turn_type,
+            tool_calls=reply.tool_calls,
+            context_sources=reply.context_sources,
+            is_final=True,
+        )
+        return
+
+    assembled = ""
+    last_index = len(pieces) - 1
+    for index, token in enumerate(pieces):
+        delta = f"{token} "
+        assembled = f"{assembled}{delta}"
+        yield AssistantReplyChunk(
+            delta=delta,
+            full_text=assembled.rstrip() if index == last_index else assembled,
+            turn_type=reply.turn_type,
+            tool_calls=reply.tool_calls,
+            context_sources=reply.context_sources,
+            is_final=index == last_index,
+        )
+        await asyncio.sleep(0)
 
 
 async def _next_primary_question(
@@ -864,31 +919,39 @@ async def produce_assistant_reply(
     session: InterviewChatSession,
     job: Job,
     message: str,
-) -> list[AssistantReply]:
-    safe_message = _single_line(message)
-    replies: list[AssistantReply] = []
+) -> AsyncIterator[AssistantReplyChunk]:
+    raw_message = _clean(message)
+    normalized_message = _single_line(raw_message)
     metadata = _ensure_metadata(session)
     turns = list_turns(db, session)
-    if safe_message:
-        add_turn(db, session=session, speaker="user", turn_type="answer", content=safe_message)
-        _append_memory(metadata, safe_message)
+    if raw_message:
+        add_turn(
+            db,
+            session=session,
+            speaker="user",
+            turn_type="question" if session.is_waiting_for_candidate_question else "answer",
+            content=raw_message,
+        )
+        _append_memory(metadata, normalized_message or raw_message)
     if session.is_waiting_for_candidate_question:
-        replies.append(await _answer_candidate_question(db, session=session, job=job, message=safe_message))
+        reply = await _answer_candidate_question(db, session=session, job=job, message=raw_message)
+        async for chunk in _stream_assistant_reply(reply):
+            yield chunk
         session.session_metadata = metadata
-        return replies
+        return
     if session.phase == "closing":
         # Terminal guard: never reopen primary-question flow after closing Q&A.
-        replies.append(
-            AssistantReply(
-                text=_post_closing_acknowledgement(safe_message),
-                turn_type="follow_up",
-                tool_calls=[],
-                context_sources=[],
-            )
+        reply = AssistantReply(
+            text=_post_closing_acknowledgement(raw_message),
+            turn_type="follow_up",
+            tool_calls=[],
+            context_sources=[],
         )
+        async for chunk in _stream_assistant_reply(reply):
+            yield chunk
         session.session_metadata = metadata
         session.updated_at = datetime.utcnow()
-        return replies
+        return
     if metadata.get("preparation_status") != "ready":
         _prepare_session_context(db, session=session, job=job)
         metadata = _ensure_metadata(session)
@@ -901,18 +964,20 @@ async def produce_assistant_reply(
         _start_new_thread(metadata, category=first_category, question=first_question)
         session.current_question_index = int(session.current_question_index or 0) + 1
         session.phase = first_category
-        replies.append(AssistantReply(text=opening, turn_type="transition", tool_calls=[], context_sources=[]))
-        replies.append(
-            AssistantReply(
-                text=first_question,
-                turn_type="question",
-                tool_calls=first_tool_calls,
-                context_sources=first_context_sources,
-            )
+        opening_reply = AssistantReply(text=opening, turn_type="transition", tool_calls=[], context_sources=[])
+        question_reply = AssistantReply(
+            text=first_question,
+            turn_type="question",
+            tool_calls=first_tool_calls,
+            context_sources=first_context_sources,
         )
+        async for chunk in _stream_assistant_reply(opening_reply):
+            yield chunk
+        async for chunk in _stream_assistant_reply(question_reply):
+            yield chunk
         session.session_metadata = metadata
         session.updated_at = datetime.utcnow()
-        return replies
+        return
     if not thread:
         next_category, next_question, next_tool_calls, next_context_sources = await _next_primary_question(
             db, session=session, job=job, metadata=metadata
@@ -920,57 +985,59 @@ async def produce_assistant_reply(
         _start_new_thread(metadata, category=next_category, question=next_question)
         session.current_question_index = int(session.current_question_index or 0) + 1
         session.phase = next_category
-        replies.append(
-            AssistantReply(
-                text=next_question,
-                turn_type="question",
-                tool_calls=next_tool_calls,
-                context_sources=next_context_sources,
-            )
+        reply = AssistantReply(
+            text=next_question,
+            turn_type="question",
+            tool_calls=next_tool_calls,
+            context_sources=next_context_sources,
         )
+        async for chunk in _stream_assistant_reply(reply):
+            yield chunk
         session.session_metadata = metadata
         session.updated_at = datetime.utcnow()
-        return replies
-    if safe_message:
-        thread["user_messages"].append(safe_message)
-    if safe_message and _thread_followup_needed(thread, safe_message):
+        return
+    if raw_message:
+        thread["user_messages"].append(normalized_message or raw_message)
+    if raw_message and _thread_followup_needed(thread, normalized_message or raw_message):
         if thread["follow_up_count"] < int(metadata.get("thread_follow_up_limit") or FOLLOW_UP_LIMIT):
-            context_sources, tool_calls = await build_context_tools(db, job=job, query=safe_message)
-            follow_up = _thread_followup_prompt(thread, safe_message)
+            context_sources, tool_calls = await build_context_tools(db, job=job, query=normalized_message or raw_message)
+            follow_up = _thread_followup_prompt(thread, normalized_message or raw_message)
             thread["follow_up_count"] += 1
             thread["assistant_messages"].append(follow_up)
             _store_thread(metadata, thread)
-            replies.append(AssistantReply(text=follow_up, turn_type="follow_up", tool_calls=tool_calls, context_sources=context_sources))
+            reply = AssistantReply(text=follow_up, turn_type="follow_up", tool_calls=tool_calls, context_sources=context_sources)
+            async for chunk in _stream_assistant_reply(reply):
+                yield chunk
             session.session_metadata = metadata
             session.updated_at = datetime.utcnow()
-            return replies
+            return
     thread_text = "\n".join(thread["user_messages"])
     components = _score_text_components(thread_text)
     thread_score = _weighted_score(components)
     _append_thread_score(metadata, category=thread["category"], question=thread["question"], score=thread_score, components=components)
     _store_thread(metadata, None)
-    replies.append(
-        AssistantReply(
-            text=_build_intermediate_acknowledgement(thread_text or safe_message, category=thread["category"]),
-            turn_type="transition",
-            tool_calls=[],
-            context_sources=[],
-        )
+    transition_reply = AssistantReply(
+        text=_build_intermediate_acknowledgement(thread_text or normalized_message or raw_message, category=thread["category"]),
+        turn_type="transition",
+        tool_calls=[],
+        context_sources=[],
     )
+    async for chunk in _stream_assistant_reply(transition_reply):
+        yield chunk
     if _should_end_interview(session, metadata):
         session.phase = "closing"
         session.is_waiting_for_candidate_question = True
-        replies.append(
-            AssistantReply(
-                text="We'll wrap up here. Do you have any questions for me about the role, team, or company?",
-                turn_type="question",
-                tool_calls=[],
-                context_sources=[],
-            )
+        closing_reply = AssistantReply(
+            text="We'll wrap up here. Do you have any questions for me about the role, team, or company?",
+            turn_type="question",
+            tool_calls=[],
+            context_sources=[],
         )
+        async for chunk in _stream_assistant_reply(closing_reply):
+            yield chunk
         session.session_metadata = metadata
         session.updated_at = datetime.utcnow()
-        return replies
+        return
     next_category, next_question, next_tool_calls, next_context_sources = await _next_primary_question(
         db, session=session, job=job, metadata=metadata
     )
@@ -979,18 +1046,20 @@ async def produce_assistant_reply(
     session.current_question_index = int(session.current_question_index or 0) + 1
     session.phase = next_category
     if transition:
-        replies.append(AssistantReply(text=transition, turn_type="transition", tool_calls=[], context_sources=[]))
-    replies.append(
-        AssistantReply(
-            text=next_question,
-            turn_type="question",
-            tool_calls=next_tool_calls,
-            context_sources=next_context_sources,
-        )
+        transition_line_reply = AssistantReply(text=transition, turn_type="transition", tool_calls=[], context_sources=[])
+        async for chunk in _stream_assistant_reply(transition_line_reply):
+            yield chunk
+    next_question_reply = AssistantReply(
+        text=next_question,
+        turn_type="question",
+        tool_calls=next_tool_calls,
+        context_sources=next_context_sources,
     )
+    async for chunk in _stream_assistant_reply(next_question_reply):
+        yield chunk
     session.session_metadata = metadata
     session.updated_at = datetime.utcnow()
-    return replies
+    return
 
 
 async def end_session_and_trigger_handoff(db: Session, *, session: InterviewChatSession, job: Job) -> dict[str, object]:
@@ -1008,30 +1077,38 @@ async def end_session_and_trigger_handoff(db: Session, *, session: InterviewChat
     transcript_text = "\n".join(transcript_lines)[-7000:]
     cv = db.query(CV).order_by(CV.created_at.desc(), CV.id.desc()).first()
     handoff_run_id: str | None = None
-    handoff_status = "skipped"
+    handoff_status = "not_triggered"
+    session.status = "completed"
+    session.phase = "completed"
+    session.completed_at = datetime.utcnow()
+    session.updated_at = datetime.utcnow()
+    session.handoff_run_id = handoff_run_id
+    db.add(session)
+    db.flush()
     if cv and _clean(job.description):
         scoring_context = (
             f"{_clean(job.description)}\n\n"
             "Interview transcript summary (for Story 4 handoff context):\n"
             f"{transcript_text}"
         )
-        result = await execute_scoring_orchestrator(
-            db,
-            cv_id=cv.id,
-            cv_text=cv.parsed_text or "",
-            job_title=job.title,
-            company=job.company,
-            job_description=scoring_context,
-            actor="interview-chat.end",
-            source="interview_chat",
-            idempotency_key=f"interview-chat:{session.session_id}:story4",
-        )
-        handoff_run_id = result.run_id
-        handoff_status = "triggered"
-    session.status = "completed"
-    session.phase = "completed"
-    session.completed_at = datetime.utcnow()
-    session.updated_at = datetime.utcnow()
+        try:
+            result = await execute_scoring_orchestrator(
+                db,
+                cv_id=cv.id,
+                cv_text=cv.parsed_text or "",
+                job_title=job.title,
+                company=job.company,
+                job_description=scoring_context,
+                actor="interview-chat.end",
+                source="interview_chat",
+                idempotency_key=f"interview-chat:{session.session_id}:story4",
+            )
+            handoff_run_id = result.run_id
+            handoff_status = "triggered"
+        except Exception as exc:
+            handoff_status = "failed"
+            logger.exception("Story 4 scoring handoff failed for session=%s: %s", session.session_id, exc)
+
     session.handoff_run_id = handoff_run_id
     metadata = _ensure_metadata(session)
     metadata["story4_scoring_triggered"] = handoff_status == "triggered"

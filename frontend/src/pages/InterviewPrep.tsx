@@ -238,7 +238,18 @@ export default function InterviewPrep() {
                       <div className="flex items-start gap-2">
                         <button
                           type="button"
-                          onClick={() => void loadSessionDetail(session.session_id)}
+                          onClick={() => {
+                            void (async () => {
+                              try {
+                                await loadSessionDetail(session.session_id)
+                              } catch (error: unknown) {
+                                setActiveSession(null)
+                                setLatestFeedback(null)
+                                setStreamingText('')
+                                toast.error(error instanceof Error ? error.message : 'Could not load interview session')
+                              }
+                            })()
+                          }}
                           className="flex-1 text-left px-1"
                         >
                           <div className="text-xs font-medium text-text-primary">{session.label}</div>

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.sql import func
 
 from ..database import Base
@@ -27,6 +27,9 @@ class InterviewChatSession(Base):
 
 class InterviewChatTurn(Base):
     __tablename__ = "interview_chat_turns"
+    __table_args__ = (
+        UniqueConstraint("session_id", "turn_index", name="uix_interviewchatturn_session_turn"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("interview_chat_sessions.id"), index=True, nullable=False)
