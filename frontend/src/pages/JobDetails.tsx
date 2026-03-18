@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
-import { ArrowLeft, AlertCircle, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { useDropzone } from 'react-dropzone'
+import { ArrowLeft, AlertCircle, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle, Upload, FileText } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import {
@@ -14,6 +15,9 @@ import {
   getPracticeNextQuestion,
   discardPracticeQuestion,
   askPracticeInterviewer,
+  getJobInterviewDocuments,
+  uploadJobInterviewDocument,
+  type InterviewKnowledgeDocument,
 } from '../lib/api'
 import { formatDate, scoreColor } from '../lib/utils'
 import toast from 'react-hot-toast'
@@ -121,6 +125,9 @@ export default function JobDetails() {
   const [questionWindow, setQuestionWindow] = useState<'all' | 'older-than-six-months' | 'six-months' | 'three-months' | 'thirty-days'>(
     'all',
   )
+  const [interviewDocuments, setInterviewDocuments] = useState<InterviewKnowledgeDocument[]>([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [uploadingDocument, setUploadingDocument] = useState(false)
 
   const getQuestionSourceWindow = (windowFilter: typeof questionWindow): string => {
     if (windowFilter === 'older-than-six-months') {
@@ -387,6 +394,88 @@ export default function JobDetails() {
     }
   }
 
+  const documentStatusClass = (status: string): string => {
+    const normalized = status.toLowerCase()
+    if (normalized.includes('embed')) {
+      return 'bg-sage-100 text-sage-700 border border-sage-200'
+    }
+    if (normalized.includes('processing')) {
+      return 'bg-amber-100 text-amber-700 border border-amber-200'
+    }
+    if (normalized.includes('failed')) {
+      return 'bg-red-100 text-red-700 border border-red-200'
+    }
+    return 'bg-gray-100 text-text-muted border border-border'
+  }
+
+  const handleInterviewDocsDrop = useCallback(
+    async (files: File[]) => {
+      const file = files[0]
+      if (!file || !job?.id) return
+      setUploadingDocument(true)
+      try {
+        const newDoc = await uploadJobInterviewDocument(job.id, file)
+        setInterviewDocuments((current) => [newDoc, ...current])
+        toast.success('Interview document uploaded')
+      } catch (err: unknown) {
+        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Upload failed'
+        toast.error(detail)
+      } finally {
+        setUploadingDocument(false)
+      }
+    },
+    [job?.id],
+  )
+
+  const {
+    getRootProps: getInterviewDocsRootProps,
+    getInputProps: getInterviewDocsInputProps,
+    isDragActive: isInterviewDocsDragActive,
+  } = useDropzone({
+    onDrop: handleInterviewDocsDrop,
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/msword': ['.doc'],
+      'text/markdown': ['.md', '.markdown'],
+      'text/plain': ['.txt'],
+    },
+    maxFiles: 1,
+    disabled: uploadingDocument,
+  })
+
+  useEffect(() => {
+    if (!job?.id) {
+      setInterviewDocuments([])
+      return
+    }
+
+    let cancelled = false
+
+    const fetchDocuments = async () => {
+      setDocumentsLoading(true)
+      try {
+        const docs = await getJobInterviewDocuments(job.id)
+        if (!cancelled) {
+          setInterviewDocuments(docs)
+        }
+      } catch {
+        if (!cancelled) {
+          setInterviewDocuments([])
+        }
+      } finally {
+        if (!cancelled) {
+          setDocumentsLoading(false)
+        }
+      }
+    }
+
+    void fetchDocuments()
+    return () => {
+      cancelled = true
+    }
+  }, [job?.id])
+
   if (loading) {
     return (
       <div className="max-w-6xl mx-auto px-8 py-10">
@@ -480,6 +569,48 @@ export default function JobDetails() {
             <p className="text-xs text-text-secondary leading-relaxed">{job.reason}</p>
           </div>
         )}
+
+        <div className="card p-4 mb-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Upload className="w-3.5 h-3.5 text-text-secondary" />
+            <span className="text-xs font-semibold text-text-primary">Interview Documents</span>
+          </div>
+          <div
+            {...getInterviewDocsRootProps()}
+            className={`border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors ${
+              isInterviewDocsDragActive ? 'border-sage-400 bg-sage-50' : 'border-border hover:border-sage-300 hover:bg-gray-50'
+            } ${uploadingDocument ? 'opacity-60 pointer-events-none' : ''}`}
+          >
+            <input {...getInterviewDocsInputProps()} />
+            <FileText className="w-6 h-6 text-text-muted mx-auto mb-2" />
+            <p className="text-xs font-medium text-text-secondary mb-1">
+              {isInterviewDocsDragActive ? 'Drop interview docs here…' : 'Drop or upload PDF / DOCX / DOC / MD / TXT'}
+            </p>
+            <p className="text-[11px] text-text-muted">These documents are used as job-level interview context.</p>
+            {uploadingDocument && <p className="text-xs text-sage-600 mt-2 font-medium">Uploading…</p>}
+          </div>
+          <div className="mt-3">
+            {documentsLoading ? (
+              <p className="text-xs text-text-muted">Loading interview documents…</p>
+            ) : interviewDocuments.length === 0 ? (
+              <p className="text-xs text-text-muted">No job-specific interview documents uploaded yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {interviewDocuments.map((doc) => (
+                  <div key={doc.id} className="border border-border rounded p-2">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="text-text-primary font-medium truncate">{doc.source_filename}</div>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] ${documentStatusClass(doc.status)}`}>
+                        {doc.status}
+                      </span>
+                    </div>
+                    {doc.error_message && <p className="text-[11px] text-red-600 mt-1">{doc.error_message}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Deep analysis trigger */}
         <div className="mt-3 pt-3 border-t border-border">

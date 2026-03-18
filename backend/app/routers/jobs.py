@@ -1,5 +1,5 @@
 """Jobs routes for scraping and retrieving job records."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 import time
@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Optional
 import asyncio
 import json
+from pathlib import Path
 from ..scrapers.linkedin import scrape_linkedin
 from ..services.scoring_orchestrator import execute_scoring_orchestrator
 from ..services.scrape_storage import store_scrape_results
@@ -22,6 +23,9 @@ from ..database import SessionLocal, get_db
 from ..models.cv import CV
 from ..models.score import Job, RescoreRun, ScrapeRequest
 from ..models.score import AGENT_STATE_COMPLETED, AGENT_STATE_FAILED
+from ..models.interview import InterviewKnowledgeDocument
+from ..services.cv_parser import parse_cv
+from ..services.interview_docs import build_parser_signature
 
 logger = logging.getLogger(__name__)
 
@@ -462,6 +466,50 @@ class JobItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class InterviewKnowledgeDocumentResponse(BaseModel):
+    id: int
+    owner_type: str
+    job_id: int | None
+    source_filename: str
+    content_type: str
+    status: str
+    error_message: str | None
+    parser_version: str | None
+    source_ref: str | None
+    created_at: str
+    created_by_user_id: str | None
+
+
+DOCUMENT_ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".md", ".markdown", ".txt"}
+
+
+def _serialize_job_document(document: InterviewKnowledgeDocument) -> InterviewKnowledgeDocumentResponse:
+    return InterviewKnowledgeDocumentResponse(
+        id=document.id,
+        owner_type=document.owner_type,
+        job_id=document.job_id,
+        source_filename=document.source_filename,
+        content_type=document.content_type or "",
+        status=document.status,
+        error_message=document.error_message,
+        parser_version=document.parser_version,
+        source_ref=document.source_ref,
+        created_at=str(document.created_at),
+        created_by_user_id=document.created_by_user_id,
+    )
+
+
+def _parse_document_upload(file: UploadFile) -> tuple[str, str]:
+    filename = (file.filename or "interview-doc.txt").strip()
+    suffix = Path(filename).suffix.lower()
+    if suffix not in DOCUMENT_ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(sorted(DOCUMENT_ALLOWED_EXTENSIONS))}",
+        )
+    return filename, suffix
+
+
 @router.post("/search")
 def start_job_search(req: JobSearchRequest, db: Session = Depends(get_db)):
     """Run scrape immediately and persist raw + mapped payload."""
@@ -736,6 +784,69 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
         reason=job.reason,
         created_at=str(job.created_at),
     )
+
+
+@router.get("/{job_id}/interview-documents", response_model=list[InterviewKnowledgeDocumentResponse])
+def list_job_interview_documents(job_id: int, db: Session = Depends(get_db)):
+    if not db.query(Job).filter(Job.id == job_id).first():
+        raise HTTPException(404, "Job not found")
+    docs = (
+        db.query(InterviewKnowledgeDocument)
+        .filter(
+            InterviewKnowledgeDocument.owner_type == "job",
+            InterviewKnowledgeDocument.job_id == job_id,
+        )
+        .order_by(InterviewKnowledgeDocument.id.desc())
+        .all()
+    )
+    return [_serialize_job_document(document) for document in docs]
+
+
+@router.post("/{job_id}/interview-documents", response_model=InterviewKnowledgeDocumentResponse)
+async def upload_job_interview_document(
+    job_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    filename, suffix = _parse_document_upload(file)
+    data = await file.read()
+
+    status = "pending"
+    error_message: str | None = None
+    try:
+        parsed_text = parse_cv(data, filename)
+    except ValueError as exc:
+        parsed_text = ""
+        status = "failed"
+        error_message = str(exc)
+    except Exception as exc:
+        parsed_text = ""
+        status = "failed"
+        error_message = f"Upload failed: {exc}"
+
+    if not parsed_text.strip() and status == "pending":
+        status = "failed"
+        error_message = "No text could be extracted from this document."
+
+    document = InterviewKnowledgeDocument(
+        owner_type="job",
+        job_id=job.id,
+        source_filename=filename,
+        content_type=(suffix[1:] if suffix else "txt"),
+        parsed_text=parsed_text,
+        parser_version=build_parser_signature(),
+        source_ref=build_parser_signature(),
+        status=status,
+        error_message=error_message,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+    return _serialize_job_document(document)
 
 
 @router.post("/{job_id}/analyze", response_model=JobAnalysisResponse)

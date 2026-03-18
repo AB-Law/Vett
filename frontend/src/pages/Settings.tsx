@@ -1,6 +1,17 @@
-import { useEffect, useState } from 'react'
-import { Settings2, CheckCircle2, XCircle, Loader2, Trash2, Download, Database } from 'lucide-react'
-import { getSettings, updateSettings, testConnection, clearHistory, getEmbeddingProgress, type AppSettings } from '../lib/api'
+import { useCallback, useEffect, useState } from 'react'
+import { useDropzone } from 'react-dropzone'
+import { Settings2, CheckCircle2, XCircle, Loader2, Trash2, Download, Database, Upload, FileText } from 'lucide-react'
+import {
+  getSettings,
+  updateSettings,
+  testConnection,
+  clearHistory,
+  getEmbeddingProgress,
+  getInterviewDocuments,
+  uploadInterviewDocument,
+  type AppSettings,
+  type InterviewKnowledgeDocument,
+} from '../lib/api'
 import toast from 'react-hot-toast'
 
 type Provider = 'claude' | 'openai' | 'azure_openai' | 'ollama' | 'lm_studio'
@@ -20,14 +31,18 @@ export default function Settings() {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [embeddingProgress, setEmbeddingProgress] = useState<{ total: number; embedded: number; percent: number } | null>(null)
+  const [interviewDocuments, setInterviewDocuments] = useState<InterviewKnowledgeDocument[]>([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [uploadingDocument, setUploadingDocument] = useState(false)
 
   // Pending changes
   const [activeProvider, setActiveProvider] = useState<Provider>('ollama')
   const [fields, setFields] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    Promise.all([getSettings(), getEmbeddingProgress()])
-      .then(([s, ep]) => {
+    setDocumentsLoading(true)
+    Promise.all([getSettings(), getEmbeddingProgress(), getInterviewDocuments()])
+      .then(([s, ep, docs]) => {
         setSettings(s)
         setActiveProvider(s.active_provider as Provider)
         setFields({
@@ -42,11 +57,65 @@ export default function Settings() {
           lm_studio_model: s.lm_studio_model,
         })
         setEmbeddingProgress(ep)
+        setInterviewDocuments(docs)
       })
-      .finally(() => setLoading(false))
+      .finally(() => {
+        setLoading(false)
+        setDocumentsLoading(false)
+      })
   }, [])
 
   const set = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }))
+
+  const statusClass = (status: string): string => {
+    const normalized = status.toLowerCase()
+    if (normalized.includes('embed')) {
+      return 'bg-sage-100 text-sage-700 border border-sage-200'
+    }
+    if (normalized.includes('processing')) {
+      return 'bg-amber-100 text-amber-700 border border-amber-200'
+    }
+    if (normalized.includes('failed')) {
+      return 'bg-red-100 text-red-700 border border-red-200'
+    }
+    return 'bg-gray-100 text-text-muted border border-border'
+  }
+
+  const handleInterviewDocsDrop = useCallback(
+    async (files: File[]) => {
+      const file = files[0]
+      if (!file) return
+      setUploadingDocument(true)
+      try {
+        const newDoc = await uploadInterviewDocument(file)
+        setInterviewDocuments((current) => [newDoc, ...current])
+        toast.success('Interview document uploaded')
+      } catch (err: unknown) {
+        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Upload failed'
+        toast.error(detail)
+      } finally {
+        setUploadingDocument(false)
+      }
+    },
+    [],
+  )
+
+  const {
+    getRootProps: getInterviewDocsRootProps,
+    getInputProps: getInterviewDocsInputProps,
+    isDragActive: isInterviewDocsDragActive,
+  } = useDropzone({
+    onDrop: handleInterviewDocsDrop,
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/msword': ['.doc'],
+      'text/markdown': ['.md', '.markdown'],
+      'text/plain': ['.txt'],
+    },
+    maxFiles: 1,
+    disabled: uploadingDocument,
+  })
 
   const handleSave = async () => {
     setSaving(true)
@@ -272,6 +341,53 @@ export default function Settings() {
           )}
         </div>
       )}
+
+      {/* Interview Documents */}
+      <div className="card p-5 mb-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Upload className="w-4 h-4 text-text-secondary" />
+          <h2 className="section-title">Interview Documents</h2>
+        </div>
+
+        <div
+          {...getInterviewDocsRootProps()}
+          className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
+            isInterviewDocsDragActive
+              ? 'border-sage-400 bg-sage-50'
+              : 'border-border hover:border-sage-300 hover:bg-gray-50'
+          } ${uploadingDocument ? 'opacity-60 pointer-events-none' : ''}`}
+        >
+          <input {...getInterviewDocsInputProps()} />
+          <FileText className="w-7 h-7 text-text-muted mx-auto mb-2" />
+          <p className="text-sm font-medium text-text-secondary mb-1">
+            {isInterviewDocsDragActive ? 'Drop interview docs here…' : 'Drop or upload PDF / DOCX / DOC / MD / TXT'}
+          </p>
+          <p className="text-xs text-text-muted">These documents are used as interview knowledge base references.</p>
+          {uploadingDocument && <p className="text-xs text-sage-600 mt-2 font-medium">Uploading…</p>}
+        </div>
+
+        <div className="mt-4">
+          {documentsLoading ? (
+            <p className="text-xs text-text-muted">Loading interview documents…</p>
+          ) : interviewDocuments.length === 0 ? (
+            <p className="text-xs text-text-muted">No interview documents uploaded yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {interviewDocuments.map((doc) => (
+                <div key={doc.id} className="border border-border rounded p-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <div className="text-text-primary font-medium truncate">{doc.source_filename}</div>
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] ${statusClass(doc.status)}`}>
+                      {doc.status}
+                    </span>
+                  </div>
+                  {doc.error_message && <p className="text-[11px] text-red-600 mt-1">{doc.error_message}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Data & Storage */}
       <div className="card p-5 mb-8">

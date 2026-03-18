@@ -24,6 +24,11 @@ class PracticeQuestion(Base):
     source_commit = Column(String(64))
     ingested_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    scope_type = Column(String(16), index=True)
+    scope_job_id = Column(Integer, ForeignKey("jobs.id"), index=True)
+    source_table = Column(String(64), index=True)
+    source_id = Column(Integer, ForeignKey("interview_knowledge_documents.id"), index=True)
+    source_window = Column(String(64), index=True)
 
 
 class QuestionCompany(Base):

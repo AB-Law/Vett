@@ -330,6 +330,65 @@ def _ensure_practice_questions_columns() -> None:
             if str(dim) not in current_type:
                 conn.execute(sa_text("ALTER TABLE practice_questions DROP COLUMN embedding;"))
                 conn.execute(sa_text(f"ALTER TABLE practice_questions ADD COLUMN embedding vector({dim});"))
+        additional_columns = {
+            "scope_type": "VARCHAR(16)",
+            "scope_job_id": "INTEGER",
+            "source_table": "VARCHAR(64)",
+            "source_id": "INTEGER",
+            "source_window": "VARCHAR(64)",
+        }
+        for name, column_type in additional_columns.items():
+            if name in existing:
+                continue
+            conn.execute(sa_text(f'ALTER TABLE practice_questions ADD COLUMN "{name}" {column_type};'))
+        existing_indexes = {index["name"] for index in inspector.get_indexes("practice_questions")}
+        index_map = {
+            "ix_practice_questions_scope_type": "scope_type",
+            "ix_practice_questions_scope_job_id": "scope_job_id",
+            "ix_practice_questions_source_table": "source_table",
+            "ix_practice_questions_source_id": "source_id",
+            "ix_practice_questions_source_window": "source_window",
+        }
+        for index_name, column_name in index_map.items():
+            if index_name not in existing_indexes:
+                conn.execute(sa_text(f'CREATE INDEX IF NOT EXISTS "{index_name}" ON practice_questions ("{column_name}");'))
+
+
+def _ensure_interview_documents_columns() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_knowledge_documents" not in table_names:
+        return
+
+    existing = {col["name"] for col in inspector.get_columns("interview_knowledge_documents")}
+    with engine.begin() as conn:
+        expected_columns = {
+            "id": "INTEGER",
+            "owner_type": "VARCHAR(16)",
+            "job_id": "INTEGER",
+            "source_filename": "VARCHAR(255)",
+            "content_type": "VARCHAR(80)",
+            "parsed_text": "TEXT",
+            "parser_version": "VARCHAR(64)",
+            "source_ref": "VARCHAR(120)",
+            "status": "VARCHAR(24)",
+            "error_message": "TEXT",
+            "created_by_user_id": "VARCHAR(120)",
+        }
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing:
+                continue
+            conn.execute(sa_text(f'ALTER TABLE interview_knowledge_documents ADD COLUMN "{column_name}" {column_type};'))
+        indexes = {index["name"] for index in inspector.get_indexes("interview_knowledge_documents")}
+        index_sql = [
+            ('"ix_interview_knowledge_documents_owner_type"', 'owner_type'),
+            ('"ix_interview_knowledge_documents_job_id"', 'job_id'),
+            ('"ix_interview_knowledge_documents_status"', 'status'),
+        ]
+        for index_name, column_name in index_sql:
+            if index_name.strip('"') in indexes:
+                continue
+            conn.execute(sa_text(f'CREATE INDEX IF NOT EXISTS {index_name} ON interview_knowledge_documents ("{column_name}");'))
 
 
 def _ensure_pgvector_index() -> None:
@@ -354,6 +413,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_local_context_tool_call_columns()
             _backfill_agent_runs_from_score_history()
             _ensure_practice_questions_columns()
+            _ensure_interview_documents_columns()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")
             return
