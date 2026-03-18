@@ -1051,6 +1051,34 @@ Response instructions:
 - Ask only one follow-up question or one concise hint.
 """
 
+ADAPTIVE_INTERVIEW_QUESTION_PROMPT = """
+You are a senior technical interviewer.
+Generate exactly one high-quality interview question in polished English.
+
+Return strict JSON only with this schema:
+{{
+  "question": "single interview question text",
+  "rationale": "1-2 sentence reason for choosing this question now"
+}}
+
+Hard requirements:
+- The question must be grammatically correct and natural.
+- Do NOT include bullet lists, markdown, or multiple questions.
+- Keep it concise: 1-3 sentences.
+- Respect category: {category}
+- Role: {role}
+- Company: {company}
+- Performance signal: {performance_signal}
+- Dev focus: {dev_focus}
+- Avoid repeating prior questions or close paraphrases from this list:
+{asked_questions}
+- Use this context when relevant:
+  - Job requirements: {job_requirements}
+  - CV signals: {cv_signals}
+  - Interview memory: {memory_facts}
+  - Retrieved context snippets: {context_snippets}
+"""
+
 REVIEW_AND_VARIANT_PROMPT = """
 You are a senior engineering interviewer reviewing a candidate answer.
 Be direct and specific. Return strict JSON only.
@@ -1580,6 +1608,74 @@ async def simulate_interviewer_chat(
         return response.choices[0].message.content.strip() or "Tell me which part feels unclear, and we can narrow it down."
     except Exception:
         return "Tell me your approach, and I can challenge one assumption behind it."
+
+
+async def generate_adaptive_interview_question(
+    *,
+    role: str,
+    company: str,
+    category: str,
+    performance_signal: str,
+    dev_focus: bool,
+    asked_questions: list[str],
+    job_requirements: list[str],
+    cv_signals: list[str],
+    memory_facts: list[str],
+    context_snippets: list[str] | None = None,
+) -> dict[str, str]:
+    try:
+        import litellm
+    except Exception as exc:
+        logger.warning("Adaptive interview question generation unavailable (litellm import failed): %s", exc)
+        return {"question": "", "rationale": ""}
+
+    model, kwargs = _get_litellm_model()
+    prompt = ADAPTIVE_INTERVIEW_QUESTION_PROMPT.format(
+        role=role or "this role",
+        company=company or "this company",
+        category=category or "technical",
+        performance_signal=performance_signal or "unknown",
+        dev_focus="yes" if dev_focus else "no",
+        asked_questions=json.dumps(asked_questions[-40:], ensure_ascii=True),
+        job_requirements=json.dumps(job_requirements[:20], ensure_ascii=True),
+        cv_signals=json.dumps(cv_signals[:20], ensure_ascii=True),
+        memory_facts=json.dumps(memory_facts[-20:], ensure_ascii=True),
+        context_snippets=json.dumps((context_snippets or [])[:8], ensure_ascii=True),
+    )
+    try:
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.25,
+            max_tokens=320,
+            **kwargs,
+        )
+        raw = _coerce_non_empty_string(response.choices[0].message.content)
+    except Exception as exc:
+        logger.warning("Adaptive interview question generation failed: %s", exc)
+        return {"question": "", "rationale": ""}
+
+    if not raw:
+        return {"question": "", "rationale": ""}
+
+    match = _extract_first_json_object(raw)
+    candidate = match or raw
+    parsed: dict[str, object] = {}
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        try:
+            parsed = json.loads(_sanitize_json_token_stream(candidate))
+        except Exception:
+            return {"question": "", "rationale": ""}
+
+    question = _coerce_non_empty_string(parsed.get("question"))
+    rationale = _coerce_non_empty_string(parsed.get("rationale"))
+    if not question:
+        return {"question": "", "rationale": ""}
+    if len(question) < 18:
+        return {"question": "", "rationale": ""}
+    return {"question": question, "rationale": rationale}
 
 
 async def review_solution_with_variant(

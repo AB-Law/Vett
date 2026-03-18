@@ -74,12 +74,15 @@ async def test_interview_chat_opening_and_category_order():
     done_event = next(event for event in stream_events if event.get("type") == "done")
     assert "Backend Engineer" in str(done_event.get("message"))
     assert "Acme" in str(done_event.get("message"))
-    assert "Tell me about a conflict you resolved on a team." in str(done_event.get("message"))
+    assert "Design a rate-limited notification service." in str(done_event.get("message"))
+    assert done_event.get("preparation_status") == "ready"
 
     detail = interview_chat_router.get_interview_session(job.id, create_result.session.session_id, db=db)
     assistant_turns = [turn for turn in detail.turns if turn["speaker"] == "assistant"]
     assert assistant_turns[0]["turn_type"] == "transition"
     assert assistant_turns[1]["turn_type"] == "question"
+    assert detail.primary_question_count == 1
+    assert detail.preparation_status == "ready"
 
     await interview_chat_router.stream_interview_turn(
         job.id,
@@ -93,7 +96,7 @@ async def test_interview_chat_opening_and_category_order():
         .first()
     )
     assert session_row is not None
-    assert session_row.phase == "behavioral"
+    assert session_row.phase in {"system_design", "behavioral", "technical", "company_specific"}
 
 
 @pytest.mark.asyncio
@@ -128,6 +131,223 @@ async def test_interview_chat_vague_answer_triggers_follow_up():
     )
     assert turns
     assert turns[0].turn_type == "follow_up"
+
+
+@pytest.mark.asyncio
+async def test_thread_guardrail_does_not_increment_primary_question_count_until_thread_closes():
+    db = _new_db_session()
+    job = Job(title="Backend Engineer", company="GuardrailCo", description="Build and scale APIs.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(message=None),
+        db=db,
+    )
+
+    for _ in range(5):
+        await interview_chat_router.stream_interview_turn(
+            job.id,
+            session.session_id,
+            interview_chat_router.InterviewChatStreamRequest(message="Not sure, maybe."),
+            db=db,
+        )
+        row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+        assert row is not None
+        assert row.current_question_index == 1
+
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(message="Not sure, maybe."),
+        db=db,
+    )
+    row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+    assert row is not None
+    assert row.current_question_index == 2
+
+
+@pytest.mark.asyncio
+async def test_thread_scoring_aggregates_whole_conversation():
+    db = _new_db_session()
+    job = Job(title="Data Engineer", company="ScoringCo", description="Own ETL quality and platform reliability.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(message=None),
+        db=db,
+    )
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(
+            message="I led the migration, reduced latency by 32%, and handled rollback trade-offs with incident metrics.",
+        ),
+        db=db,
+    )
+
+    row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+    assert row is not None
+    metadata = dict(row.session_metadata or {})
+    assert isinstance(metadata.get("thread_score_snapshot"), dict)
+    answer_scores = metadata.get("answer_scores")
+    assert isinstance(answer_scores, list)
+    assert len(answer_scores) >= 1
+
+
+@pytest.mark.asyncio
+async def test_post_closing_message_does_not_reopen_primary_question_flow(monkeypatch):
+    db = _new_db_session()
+    job = Job(title="Backend Engineer", company="CloseGuard", description="Build resilient backend systems.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(message=None),
+        db=db,
+    )
+
+    monkeypatch.setattr(interview_chat_service, "_should_end_interview", lambda *_args, **_kwargs: True)
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(
+            message="I led an incident review and reduced recurring failures by 35% through ownership and metrics.",
+        ),
+        db=db,
+    )
+
+    row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+    assert row is not None
+    assert row.phase == "closing"
+    assert row.is_waiting_for_candidate_question is True
+    assert row.current_question_index == 1
+
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(
+            message="How does the team measure success for this role after onboarding?",
+        ),
+        db=db,
+    )
+    row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+    assert row is not None
+    assert row.phase == "closing"
+    assert row.is_waiting_for_candidate_question is False
+    assert row.current_question_index == 1
+
+    question_turn_count_before_extra = (
+        db.query(InterviewChatTurn)
+        .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
+        .filter(
+            InterviewChatSession.session_id == session.session_id,
+            InterviewChatTurn.speaker == "assistant",
+            InterviewChatTurn.turn_type == "question",
+        )
+        .count()
+    )
+
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(message="One more thing, thanks."),
+        db=db,
+    )
+
+    row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+    assert row is not None
+    assert row.phase == "closing"
+    assert row.current_question_index == 1
+    metadata = dict(row.session_metadata or {})
+    assert metadata.get("active_question_thread") is None
+
+    question_turn_count_after_extra = (
+        db.query(InterviewChatTurn)
+        .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
+        .filter(
+            InterviewChatSession.session_id == session.session_id,
+            InterviewChatTurn.speaker == "assistant",
+            InterviewChatTurn.turn_type == "question",
+        )
+        .count()
+    )
+    assert question_turn_count_after_extra == question_turn_count_before_extra
+
+    last_assistant_turn = (
+        db.query(InterviewChatTurn)
+        .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
+        .filter(InterviewChatSession.session_id == session.session_id, InterviewChatTurn.speaker == "assistant")
+        .order_by(InterviewChatTurn.turn_index.desc())
+        .first()
+    )
+    assert last_assistant_turn is not None
+    assert last_assistant_turn.turn_type == "follow_up"
+
+
+@pytest.mark.asyncio
+async def test_cross_session_question_dedup_avoids_repeat():
+    db = _new_db_session()
+    job = Job(title="Platform Engineer", company="NoRepeat", description="Own distributed backend systems.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    first_session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        first_session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(message=None),
+        db=db,
+    )
+    first_question = (
+        db.query(InterviewChatTurn)
+        .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
+        .filter(
+            InterviewChatSession.session_id == first_session.session_id,
+            InterviewChatTurn.speaker == "assistant",
+            InterviewChatTurn.turn_type == "question",
+        )
+        .order_by(InterviewChatTurn.turn_index.asc())
+        .first()
+    )
+    assert first_question is not None
+
+    await interview_chat_router.end_interview_session(job.id, first_session.session_id, db=db)
+
+    second_session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    await interview_chat_router.stream_interview_turn(
+        job.id,
+        second_session.session_id,
+        interview_chat_router.InterviewChatStreamRequest(message=None),
+        db=db,
+    )
+    second_question = (
+        db.query(InterviewChatTurn)
+        .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
+        .filter(
+            InterviewChatSession.session_id == second_session.session_id,
+            InterviewChatTurn.speaker == "assistant",
+            InterviewChatTurn.turn_type == "question",
+        )
+        .order_by(InterviewChatTurn.turn_index.asc())
+        .first()
+    )
+    assert second_question is not None
+    assert first_question.content != second_question.content
 
 
 @pytest.mark.asyncio

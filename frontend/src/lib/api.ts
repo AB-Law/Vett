@@ -377,11 +377,25 @@ export interface InterviewChatSession {
   completed_at: string | null
   turn_count: number
   handoff_run_id: string | null
+  preparation_status?: string | null
+  rolling_score?: number | null
+  limits?: {
+    min_questions: number
+    target_questions: number
+    max_questions: number
+  } | null
+  primary_question_count?: number
 }
 
 export interface InterviewChatSessionDetail extends InterviewChatSession {
   job_id: number
   feedback?: InterviewChatFeedback | null
+  thread_score_snapshot?: {
+    score?: number
+    rolling_score?: number
+    category?: string
+    question?: string
+  } | null
   turns: InterviewChatTurn[]
 }
 
@@ -413,6 +427,15 @@ export type InterviewChatStreamResult = {
   turn_types: string[]
   tool_calls: InterviewChatToolCall[]
   context_sources: string[]
+  preparation_status?: string
+  rolling_score?: number | null
+  thread_score_snapshot?: Record<string, unknown> | null
+  primary_question_count?: number
+  limits?: {
+    min_questions: number
+    target_questions: number
+    max_questions: number
+  } | null
 }
 
 export const streamInterviewChatTurn = async (
@@ -451,6 +474,15 @@ export const streamInterviewChatTurn = async (
         turn_types?: string[]
         tool_calls?: InterviewChatToolCall[]
         context_sources?: string[]
+        preparation_status?: string
+        rolling_score?: number
+        thread_score_snapshot?: Record<string, unknown> | null
+        primary_question_count?: number
+        limits?: {
+          min_questions: number
+          target_questions: number
+          max_questions: number
+        }
       }
       if (payload.type === 'token' && payload.delta) {
         onToken(payload.delta)
@@ -462,6 +494,11 @@ export const streamInterviewChatTurn = async (
           turn_types: payload.turn_types || [],
           tool_calls: payload.tool_calls || [],
           context_sources: payload.context_sources || [],
+          preparation_status: payload.preparation_status,
+          rolling_score: typeof payload.rolling_score === 'number' ? payload.rolling_score : null,
+          thread_score_snapshot: payload.thread_score_snapshot ?? null,
+          primary_question_count: payload.primary_question_count ?? 0,
+          limits: payload.limits ?? null,
         }
       }
     }

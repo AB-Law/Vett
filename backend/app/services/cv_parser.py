@@ -29,7 +29,6 @@ _CONTINUATION_START_WORDS = {
     "which",
 }
 
-
 def parse_cv(file_bytes: bytes, filename: str) -> str:
     suffix = Path(filename).suffix.lower()
 
@@ -170,6 +169,7 @@ def _parse_markdown(data: bytes) -> str:
 
 def _normalise_extracted_text(text: str) -> str:
     text = text.replace("\r", "\n")
+    text = text.replace("\x00", "")
     text = text.replace("\u00a0", " ")
     text = text.replace("\u00ad", "")
 

@@ -439,6 +439,56 @@ def _ensure_interview_research_sessions_table() -> None:
                 continue
             connection.execute(sa_text(f'ALTER TABLE "interview_research_sessions" ADD COLUMN "{column_name}" {column_type};'))
 
+
+def _ensure_interview_chat_sessions_table() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_chat_sessions" not in table_names:
+        return
+    existing = {column["name"] for column in inspector.get_columns("interview_chat_sessions")}
+    expected_columns = {
+        "id": "INTEGER",
+        "session_id": "VARCHAR(64)",
+        "job_id": "INTEGER",
+        "label": "VARCHAR(120)",
+        "status": "VARCHAR(24)",
+        "phase": "VARCHAR(32)",
+        "current_question_index": "INTEGER",
+        "is_waiting_for_candidate_question": "BOOLEAN",
+        "question_plan": "JSON",
+        "session_metadata": "JSON",
+        "handoff_run_id": "VARCHAR(64)",
+        "created_at": "TIMESTAMP",
+        "updated_at": "TIMESTAMP",
+        "completed_at": "TIMESTAMP",
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing:
+                continue
+            connection.execute(sa_text(f'ALTER TABLE "interview_chat_sessions" ADD COLUMN "{column_name}" {column_type};'))
+
+        if engine.dialect.name == "postgresql":
+            connection.execute(
+                sa_text(
+                    "UPDATE interview_chat_sessions "
+                    "SET question_plan = COALESCE(question_plan, '[]'::json), "
+                    "    session_metadata = COALESCE(session_metadata, '{}'::json), "
+                    "    current_question_index = COALESCE(current_question_index, 0), "
+                    "    is_waiting_for_candidate_question = COALESCE(is_waiting_for_candidate_question, FALSE);"
+                )
+            )
+        else:
+            connection.execute(
+                sa_text(
+                    "UPDATE interview_chat_sessions "
+                    "SET question_plan = COALESCE(question_plan, '[]'), "
+                    "    session_metadata = COALESCE(session_metadata, '{}'), "
+                    "    current_question_index = COALESCE(current_question_index, 0), "
+                    "    is_waiting_for_candidate_question = COALESCE(is_waiting_for_candidate_question, 0);"
+                )
+            )
+
 def _ensure_pgvector_index() -> None:
     from sqlalchemy import text as sa_text
     with engine.begin() as conn:
@@ -463,6 +513,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_practice_questions_columns()
             _ensure_interview_documents_columns()
             _ensure_interview_research_sessions_table()
+            _ensure_interview_chat_sessions_table()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")
             return

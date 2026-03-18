@@ -28,6 +28,7 @@ export default function InterviewPrep() {
   const [streamingText, setStreamingText] = useState('')
   const [latestFeedback, setLatestFeedback] = useState<InterviewChatFeedback | null>(null)
   const transcriptRef = useRef<HTMLDivElement | null>(null)
+  const autoStartedRef = useRef(false)
 
   const numericId = useMemo(() => Number(id || 0), [id])
 
@@ -70,6 +71,10 @@ export default function InterviewPrep() {
     }
   }, [numericId])
 
+  useEffect(() => {
+    autoStartedRef.current = false
+  }, [numericId])
+
   const streamTurn = async (message: string | null): Promise<void> => {
     if (!activeSession || sending) return
     setSending(true)
@@ -89,6 +94,13 @@ export default function InterviewPrep() {
   }
 
   const activeTurnCount = activeSession?.turns.length ?? 0
+  const isPreparing =
+    activeSession?.status === 'active' &&
+    (activeSession.phase === 'preparing' ||
+      (activeSession.preparation_status !== undefined &&
+        activeSession.preparation_status !== null &&
+        activeSession.preparation_status !== 'ready' &&
+        (activeSession.turns?.length ?? 0) === 0))
 
   const getAssistantTurnLabel = (turnType: string): string => {
     if (turnType === 'question') return 'Question'
@@ -129,6 +141,12 @@ export default function InterviewPrep() {
       setSending(false)
     }
   }
+
+  useEffect(() => {
+    if (loading || sending || !job || activeSession || autoStartedRef.current) return
+    autoStartedRef.current = true
+    void startOrResume()
+  }, [loading, sending, job, activeSession])
 
   const sendMessage = async (): Promise<void> => {
     if (!draft.trim()) return
@@ -198,7 +216,7 @@ export default function InterviewPrep() {
             </div>
             <button type="button" className="btn-primary text-xs py-1.5 px-3 shrink-0" onClick={() => void startOrResume()} disabled={sending}>
               {sending ? <Loader2 className="inline w-3 h-3 mr-1 animate-spin" /> : <Play className="inline w-3 h-3 mr-1" />}
-              Start
+              Resume
             </button>
           </div>
 
@@ -258,6 +276,16 @@ export default function InterviewPrep() {
                   <div className="mt-1 flex items-center gap-2 text-[11px] text-text-secondary">
                     <span className="rounded-full border border-border px-2 py-0.5 capitalize">{activeSession.status}</span>
                     <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 capitalize">{activeSession.phase.split('_').join(' ')}</span>
+                    {activeSession.limits ? (
+                      <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5">
+                        Q {activeSession.primary_question_count ?? 0}/{activeSession.limits.max_questions}
+                      </span>
+                    ) : null}
+                    {typeof activeSession.rolling_score === 'number' ? (
+                      <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5">
+                        Score {Math.round(activeSession.rolling_score)}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <button
@@ -270,6 +298,17 @@ export default function InterviewPrep() {
                   End Interview
                 </button>
               </div>
+
+              {isPreparing ? (
+                <div className="h-[560px] flex flex-col items-center justify-center gap-3 text-center px-6">
+                  <Loader2 className="w-7 h-7 animate-spin text-blue-600" />
+                  <p className="text-sm font-medium text-text-primary">Preparing interviewer…</p>
+                  <p className="text-xs text-text-muted max-w-md">
+                    Building role context, selecting focus areas, and creating a dynamic interview strategy.
+                  </p>
+                </div>
+              ) : (
+                <>
 
               {latestFeedback && activeSession.status === 'completed' ? (
                 <div className="mx-4 mt-4 rounded-xl border border-blue-200 bg-blue-50/60 p-3 text-sm">
@@ -371,10 +410,12 @@ export default function InterviewPrep() {
                   </button>
                 </div>
               </div>
+                </>
+              )}
             </>
           ) : (
             <div className="h-[560px] flex items-center justify-center text-sm text-text-muted">
-              Start a session to begin interview practice.
+              Preparing your interview session…
             </div>
           )}
         </section>

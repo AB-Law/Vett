@@ -34,11 +34,16 @@ class InterviewChatSessionSummary(BaseModel):
     completed_at: str | None = None
     turn_count: int
     handoff_run_id: str | None = None
+    preparation_status: str | None = None
+    rolling_score: float | None = None
+    limits: dict[str, int] | None = None
+    primary_question_count: int = 0
 
 
 class InterviewChatSessionDetail(InterviewChatSessionSummary):
     job_id: int
     feedback: dict[str, object] | None = None
+    thread_score_snapshot: dict[str, object] | None = None
     turns: list[dict[str, object]] = Field(default_factory=list)
 
 
@@ -67,6 +72,11 @@ def _serialize_session(db: Session, session: InterviewChatSession, include_turns
     turns = list_turns(db, session)
     metadata = dict(session.session_metadata or {})
     feedback = metadata.get("feedback")
+    limits = metadata.get("limits") if isinstance(metadata.get("limits"), dict) else None
+    raw_rolling = metadata.get("rolling_score")
+    rolling_score = float(raw_rolling) if isinstance(raw_rolling, (float, int)) else None
+    preparation_status = _normalize_preparation_status(metadata)
+    thread_score_snapshot = metadata.get("thread_score_snapshot") if isinstance(metadata.get("thread_score_snapshot"), dict) else None
     return InterviewChatSessionDetail(
         session_id=session.session_id,
         label=session.label,
@@ -78,9 +88,22 @@ def _serialize_session(db: Session, session: InterviewChatSession, include_turns
         turn_count=len(turns),
         job_id=session.job_id,
         handoff_run_id=session.handoff_run_id,
+        preparation_status=preparation_status,
+        rolling_score=rolling_score,
+        limits=limits,
+        primary_question_count=int(session.current_question_index or 0),
         feedback=feedback if isinstance(feedback, dict) else None,
+        thread_score_snapshot=thread_score_snapshot,
         turns=[serialize_turn(turn) for turn in turns] if include_turns else [],
     )
+
+
+def _normalize_preparation_status(metadata: dict[str, object]) -> str | None:
+    raw = metadata.get("preparation_status")
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
 
 
 def _load_job_or_404(db: Session, job_id: int) -> Job:
@@ -124,6 +147,14 @@ def list_interview_sessions(job_id: int, db: Session = Depends(get_db)) -> list[
                 completed_at=str(row.completed_at) if row.completed_at else None,
                 turn_count=turn_count,
                 handoff_run_id=row.handoff_run_id,
+                preparation_status=_normalize_preparation_status(dict(row.session_metadata or {})),
+                rolling_score=float((row.session_metadata or {}).get("rolling_score"))
+                if isinstance((row.session_metadata or {}).get("rolling_score"), (float, int))
+                else None,
+                limits=(row.session_metadata or {}).get("limits")
+                if isinstance((row.session_metadata or {}).get("limits"), dict)
+                else None,
+                primary_question_count=int(row.current_question_index or 0),
             )
         )
     return response
@@ -202,6 +233,11 @@ async def stream_interview_turn(
             "tool_calls": emitted_tool_calls,
             "context_sources": emitted_context_sources,
             "phase": session.phase,
+            "preparation_status": (session.session_metadata or {}).get("preparation_status"),
+            "rolling_score": (session.session_metadata or {}).get("rolling_score"),
+            "thread_score_snapshot": (session.session_metadata or {}).get("thread_score_snapshot"),
+            "primary_question_count": int(session.current_question_index or 0),
+            "limits": (session.session_metadata or {}).get("limits"),
         }
         yield f"data: {json.dumps(done_payload)}\n\n"
 
