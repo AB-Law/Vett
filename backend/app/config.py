@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     save_history: bool = True
     default_export_format: str = "json"
 
+    # Research infra (self-hosted SearXNG)
+    searxng_enabled: bool = True
+    searxng_base_url: str = "http://searxng:8080"
+    searxng_timeout_seconds: int = 8
+    interview_research_timeout_seconds: int = 20
+
     # Phase 2
     celery_broker_url: str = "redis://redis:6379/0"
     celery_result_backend: str = "redis://redis:6379/0"

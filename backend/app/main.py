@@ -406,6 +406,37 @@ def _ensure_interview_documents_columns() -> None:
         )
 
 
+def _ensure_interview_research_sessions_table() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_research_sessions" not in table_names:
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("interview_research_sessions")}
+    expected_columns = {
+        "id": "INTEGER",
+        "session_id": "VARCHAR(64)",
+        "job_id": "INTEGER",
+        "role": "VARCHAR(255)",
+        "company": "VARCHAR(255)",
+        "status": "VARCHAR(32)",
+        "stage": "VARCHAR(40)",
+        "question_bank": "JSON",
+        "source_urls": "JSON",
+        "fallback_used": "BOOLEAN",
+        "failure_reason": "VARCHAR(500)",
+        "created_at": "TIMESTAMP",
+        "updated_at": "TIMESTAMP",
+        "completed_at": "TIMESTAMP",
+        "started_at": "TIMESTAMP",
+        "processing_ms": "INTEGER",
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing:
+                continue
+            connection.execute(sa_text(f'ALTER TABLE "interview_research_sessions" ADD COLUMN "{column_name}" {column_type};'))
+
 def _ensure_pgvector_index() -> None:
     from sqlalchemy import text as sa_text
     with engine.begin() as conn:
@@ -429,6 +460,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _backfill_agent_runs_from_score_history()
             _ensure_practice_questions_columns()
             _ensure_interview_documents_columns()
+            _ensure_interview_research_sessions_table()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")
             return

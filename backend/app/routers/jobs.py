@@ -14,14 +14,19 @@ from typing import Any, Optional
 import asyncio
 import json
 from pathlib import Path
+from ..config import get_settings
+import uuid
+from contextlib import suppress
 from ..scrapers.linkedin import scrape_linkedin
 from ..services.scoring_orchestrator import execute_scoring_orchestrator
 from ..services.scrape_storage import store_scrape_results
 from ..services.llm import score_cv_fast
+from ..services.interview_research import InterviewResearchRunContext, run_interview_research
 
 from ..database import SessionLocal, get_db
 from ..models.cv import CV
 from ..models.score import Job, RescoreRun, ScrapeRequest
+from ..models.interview_research import InterviewResearchSession
 from ..models.score import AGENT_STATE_COMPLETED, AGENT_STATE_FAILED
 from ..models.interview import InterviewKnowledgeDocument
 from ..services.cv_parser import parse_cv
@@ -68,6 +73,45 @@ class JobRescoreResponse(BaseModel):
     failed_count: int
     failed_job_ids: list[int] = Field(default_factory=list)
     message: str
+
+
+class InterviewResearchQuestion(BaseModel):
+    question: str
+    tool: str
+    query: str
+    source_url: str
+    source_title: str
+    timestamp: str
+    snippet: str
+    confidence_score: float = Field(ge=0.0, le=1.0)
+
+
+class InterviewResearchQuestionBank(BaseModel):
+    behavioral: list[InterviewResearchQuestion]
+    technical: list[InterviewResearchQuestion]
+    system_design: list[InterviewResearchQuestion]
+    company_specific: list[InterviewResearchQuestion]
+    source_urls: list[str]
+
+
+class InterviewResearchSessionResponse(BaseModel):
+    session_id: str
+    role: str
+    company: str
+    status: str
+    job_id: int
+    fallback_used: bool = False
+    message: str = ""
+    question_bank: InterviewResearchQuestionBank
+    metadata: dict[str, object] = Field(default_factory=dict)
+    source_urls: list[str]
+    failure_reason: str | None = None
+    stage: str | None = None
+    processing_ms: int | None = None
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
 
 
 class JobAnalysisResponse(BaseModel):
@@ -176,6 +220,135 @@ def _rescore_run_payload(run: RescoreRun) -> JobRescoreResponse:
         failed_job_ids=failed_job_ids,
         message=run.message or "",
     )
+
+
+def _coerce_research_question_dict(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return {
+            "question": str(value.get("question", "")),
+            "tool": str(value.get("tool", "")),
+            "query": str(value.get("query", "")),
+            "source_url": str(value.get("source_url", "")),
+            "source_title": str(value.get("source_title", "")),
+            "timestamp": str(value.get("timestamp", "")),
+            "snippet": str(value.get("snippet", "")),
+            "confidence_score": float(value.get("confidence_score", 0.5) or 0.5),
+        }
+    return {
+        "question": "",
+        "tool": "",
+        "query": "",
+        "source_url": "",
+        "source_title": "",
+        "timestamp": "",
+        "snippet": "",
+        "confidence_score": 0.5,
+    }
+
+
+def _coerce_research_question_bank(value: object) -> InterviewResearchQuestionBank:
+    if not isinstance(value, dict):
+        empty = {
+            "behavioral": [],
+            "technical": [],
+            "system_design": [],
+            "company_specific": [],
+            "source_urls": [],
+        }
+        return InterviewResearchQuestionBank(**empty)
+    payload = {
+        "behavioral": [_coerce_research_question_dict(item) for item in value.get("behavioral", [])],
+        "technical": [_coerce_research_question_dict(item) for item in value.get("technical", [])],
+        "system_design": [_coerce_research_question_dict(item) for item in value.get("system_design", [])],
+        "company_specific": [_coerce_research_question_dict(item) for item in value.get("company_specific", [])],
+        "source_urls": [str(item) for item in (value.get("source_urls", []) if isinstance(value.get("source_urls", []), list) else [])],
+    }
+    return InterviewResearchQuestionBank(**payload)
+
+
+def _serialize_interview_research_session(row: InterviewResearchSession) -> InterviewResearchSessionResponse:
+    question_bank = _coerce_research_question_bank(row.question_bank or {})
+    default_message = "Interview research failed." if row.status == "failed" else "Interview research completed."
+    session_message = row.failure_reason or default_message
+    return InterviewResearchSessionResponse(
+        session_id=row.session_id,
+        role=row.role or "",
+        company=row.company or "",
+        status=row.status or "",
+        job_id=row.job_id,
+        fallback_used=bool(row.fallback_used),
+        message=session_message,
+        question_bank=question_bank,
+        metadata={
+            "total_questions": len(question_bank.behavioral) + len(question_bank.technical) + len(question_bank.system_design) + len(question_bank.company_specific),
+        },
+        source_urls=list(question_bank.source_urls or row.source_urls or []),
+        failure_reason=row.failure_reason,
+        stage=row.stage,
+        processing_ms=row.processing_ms,
+        created_at=str(row.created_at),
+        updated_at=str(row.updated_at),
+        started_at=str(row.started_at) if row.started_at else None,
+        completed_at=str(row.completed_at) if row.completed_at else None,
+    )
+
+
+def _upsert_interview_research_session(
+    db: Session,
+    *,
+    session_id: str,
+    job_id: int,
+    role: str,
+    company: str,
+    status: str,
+    stage: str,
+    question_bank: InterviewResearchQuestionBank,
+    fallback_used: bool,
+    message: str,
+    processing_ms: int,
+    failure_reason: str | None = None,
+    completed_at: bool = False,
+) -> InterviewResearchSession:
+    row = (
+        db.query(InterviewResearchSession)
+        .filter(InterviewResearchSession.session_id == session_id)
+        .first()
+    )
+    if row is None:
+        row = InterviewResearchSession(
+            session_id=session_id,
+            job_id=job_id,
+            role=role,
+            company=company,
+            status=status,
+            stage=stage,
+            question_bank=question_bank.model_dump(),
+            source_urls=question_bank.source_urls,
+            fallback_used=bool(fallback_used),
+            failure_reason=failure_reason or message,
+            processing_ms=processing_ms,
+        )
+        row.started_at = datetime.utcnow()
+        row.updated_at = datetime.utcnow()
+        if completed_at:
+            row.completed_at = row.updated_at
+        db.add(row)
+        db.flush()
+        return row
+
+    row.status = status
+    row.stage = stage
+    row.role = role
+    row.company = company
+    row.question_bank = question_bank.model_dump()
+    row.source_urls = question_bank.source_urls
+    row.fallback_used = bool(fallback_used)
+    row.failure_reason = failure_reason or message
+    row.processing_ms = processing_ms
+    row.updated_at = datetime.utcnow()
+    if completed_at:
+        row.completed_at = row.updated_at
+    return row
 
 
 def _run_query_for_rescore(q_session: Session, source: Optional[str], only_unscored: bool):
@@ -638,6 +811,139 @@ def get_rescore_status(run_id: str, db: Session = Depends(get_db)):
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _rescore_run_payload(run)
+
+
+@router.get("/{job_id}/interview-research/session/{session_id}", response_model=InterviewResearchSessionResponse)
+def get_interview_research_session(
+    job_id: int,
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    row = (
+        db.query(InterviewResearchSession)
+        .filter(InterviewResearchSession.session_id == session_id, InterviewResearchSession.job_id == job_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Interview research session not found.")
+    return _serialize_interview_research_session(row)
+
+
+@router.get("/{job_id}/interview-research/stream")
+async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    role = (job.title or "Interview role").strip()
+    company = (job.company or "this company").strip()
+    session_id = uuid.uuid4().hex
+    settings = get_settings()
+    queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+
+    async def emit(payload: dict[str, object]) -> None:
+        event = dict(payload)
+        event["session_id"] = session_id
+        await queue.put(event)
+
+    async def produce() -> None:
+        start_ms = time.perf_counter()
+        try:
+            await emit({
+                "type": "status",
+                "stage": "initialized",
+                "message": f"Researching interview questions for {role} at {company}...",
+                "stage_payload": {},
+                "payload": {},
+            })
+            context = InterviewResearchRunContext(
+                role=role,
+                company=company,
+                job=job,
+                emit=emit,
+                timeout_seconds=settings.interview_research_timeout_seconds,
+            )
+            result = await run_interview_research(db, context)
+            result.session_id = session_id
+            processing_ms = int((time.perf_counter() - start_ms) * 1000)
+            record = _upsert_interview_research_session(
+                db,
+                session_id=session_id,
+                job_id=job.id,
+                role=role,
+                company=company,
+                status="completed",
+                stage="finalizing",
+                question_bank=result.question_bank,
+                fallback_used=result.fallback_used,
+                message=result.message,
+                processing_ms=processing_ms,
+                completed_at=True,
+            )
+            db.commit()
+            await emit({
+                "type": "done",
+                "stage": "finalizing",
+                "message": result.message,
+                "payload": {
+                    "session_id": session_id,
+                    "question_count": len(result.question_bank.all_questions()),
+                    "fallback_used": bool(result.fallback_used),
+                    "status": record.status,
+                },
+            })
+        except Exception as exc:
+            logger.exception("Interview research stream failed for job=%s", job_id)
+            processing_ms = int((time.perf_counter() - start_ms) * 1000)
+            _upsert_interview_research_session(
+                db,
+                session_id=session_id,
+                job_id=job.id,
+                role=role,
+                company=company,
+                status="failed",
+                stage="finalizing",
+                question_bank=InterviewResearchQuestionBank(
+                    behavioral=[],
+                    technical=[],
+                    system_design=[],
+                    company_specific=[],
+                    source_urls=[],
+                ),
+                fallback_used=False,
+                message="Interview research failed.",
+                processing_ms=processing_ms,
+                failure_reason=str(exc),
+                completed_at=True,
+            )
+            db.rollback()
+            db.commit()
+            await emit({
+                "type": "error",
+                "stage": "finalizing",
+                "message": str(exc),
+                "payload": {"session_id": session_id, "status": "failed"},
+            })
+        finally:
+            await queue.put(None)
+
+    async def event_generator():
+        producer = asyncio.create_task(produce())
+        try:
+            while True:
+                payload = await queue.get()
+                if payload is None:
+                    break
+                yield f"data: {json.dumps(payload)}\n\n"
+        except asyncio.CancelledError:
+            producer.cancel()
+            raise
+        finally:
+            producer.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/stream")
