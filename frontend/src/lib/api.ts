@@ -209,6 +209,31 @@ export interface AppSettings {
   has_azure_key: boolean
 }
 
+export interface CandidateProfile {
+  id: number | null
+  full_name: string
+  headline_or_target_role: string
+  current_company: string
+  years_experience: number | null
+  top_skills: string[]
+  location: string
+  linkedin_url: string
+  summary: string
+  source: string
+}
+
+export interface CandidateProfileUpdate {
+  full_name?: string
+  headline_or_target_role?: string
+  current_company?: string
+  years_experience?: number | null
+  top_skills?: string[]
+  location?: string
+  linkedin_url?: string
+  summary?: string
+  source?: string
+}
+
 export interface InterviewKnowledgeDocument {
   id: number
   owner_type: 'global' | 'job'
@@ -248,6 +273,16 @@ export const getSettings = async (): Promise<AppSettings> => {
 
 export const updateSettings = async (settings: Partial<AppSettings> & { [k: string]: unknown }): Promise<void> => {
   await api.post('/settings/', settings)
+}
+
+export const getUserProfile = async (): Promise<CandidateProfile> => {
+  const { data } = await api.get<CandidateProfile>('/profile/')
+  return data
+}
+
+export const updateUserProfile = async (payload: CandidateProfileUpdate): Promise<CandidateProfile> => {
+  const { data } = await api.post<CandidateProfile>('/profile/', payload)
+  return data
 }
 
 export const testConnection = async (): Promise<{ ok: boolean; reply?: string; error?: string }> => {
@@ -293,6 +328,17 @@ export const uploadJobInterviewDocument = async (jobId: number, file: File): Pro
   return data
 }
 
+export const getInterviewResearchSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<InterviewResearchSession> => {
+  const { data } = await api.get<InterviewResearchSession>(`/jobs/${jobId}/interview-research/session/${sessionId}`)
+  return data
+}
+
+export const buildInterviewResearchStreamUrl = (jobId: number): string =>
+  `/api/jobs/${jobId}/interview-research/stream`
+
 // ── Jobs (Phase 2) ────────────────────────────────────────────────────────────
 
 export interface Job {
@@ -328,6 +374,49 @@ export interface Job {
   gap_analysis?: string
   reason?: string
   created_at: string
+}
+
+export interface InterviewResearchQuestion {
+  question: string
+  question_text?: string
+  tool: string
+  query: string
+  source_url: string
+  source_title: string
+  source_type?: string
+  query_used?: string
+  reason?: string
+  timestamp: string
+  snippet: string
+  confidence_score: number
+}
+
+export interface InterviewResearchQuestionBank {
+  behavioral: InterviewResearchQuestion[]
+  technical: InterviewResearchQuestion[]
+  system_design: InterviewResearchQuestion[]
+  company_specific: InterviewResearchQuestion[]
+  source_urls: string[]
+}
+
+export interface InterviewResearchSession {
+  session_id: string
+  role: string
+  company: string
+  status: string
+  job_id: number
+  question_bank: InterviewResearchQuestionBank
+  fallback_used: boolean
+  message: string
+  metadata: Record<string, unknown>
+  source_urls: string[]
+  failure_reason: string | null
+  stage: string | null
+  processing_ms: number | null
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  completed_at: string | null
 }
 
 export interface JobSearchResponse {

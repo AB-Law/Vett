@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { ArrowLeft, AlertCircle, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle, Upload, FileText } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
@@ -18,6 +18,9 @@ import {
   getJobInterviewDocuments,
   uploadJobInterviewDocument,
   type InterviewKnowledgeDocument,
+  buildInterviewResearchStreamUrl,
+  getInterviewResearchSession,
+  type InterviewResearchSession,
 } from '../lib/api'
 import { formatDate, scoreColor } from '../lib/utils'
 import toast from 'react-hot-toast'
@@ -128,6 +131,12 @@ export default function JobDetails() {
   const [interviewDocuments, setInterviewDocuments] = useState<InterviewKnowledgeDocument[]>([])
   const [documentsLoading, setDocumentsLoading] = useState(false)
   const [uploadingDocument, setUploadingDocument] = useState(false)
+  const [prepEventLog, setPrepEventLog] = useState<string[]>([])
+  const [prepResearchSession, setPrepResearchSession] = useState<InterviewResearchSession | null>(null)
+  const [prepInterviewLoading, setPrepInterviewLoading] = useState(false)
+  const [prepInterviewError, setPrepInterviewError] = useState('')
+  const prepResearchEventSourceRef = useRef<EventSource | null>(null)
+  const isStoppingPrepInterviewStreamRef = useRef(false)
 
   const getQuestionSourceWindow = (windowFilter: typeof questionWindow): string => {
     if (windowFilter === 'older-than-six-months') {
@@ -238,6 +247,75 @@ export default function JobDetails() {
       setQuestionsError(error instanceof Error ? error.message : 'Failed to load interview questions right now.')
     } finally {
       setQuestionsLoading(false)
+    }
+  }
+
+  const stopInterviewResearchStream = (): void => {
+    isStoppingPrepInterviewStreamRef.current = true
+    if (prepResearchEventSourceRef.current) {
+      prepResearchEventSourceRef.current.close()
+      prepResearchEventSourceRef.current = null
+    }
+  }
+
+  const fetchResearchSession = async (sessionId: string): Promise<void> => {
+    if (!job) return
+    try {
+      const session = await getInterviewResearchSession(job.id, sessionId)
+      setPrepResearchSession(session)
+      setPrepInterviewError('')
+      await refreshQuestions()
+    } catch (error: unknown) {
+      setPrepInterviewError(error instanceof Error ? error.message : 'Could not load interview research results')
+    }
+  }
+
+  const handlePrepInterview = (): void => {
+    if (!job) return
+    stopInterviewResearchStream()
+    isStoppingPrepInterviewStreamRef.current = false
+    setPrepInterviewLoading(true)
+    setPrepInterviewError('')
+    setPrepEventLog([])
+    setPrepResearchSession(null)
+
+    const eventSource = new EventSource(buildInterviewResearchStreamUrl(job.id))
+    prepResearchEventSourceRef.current = eventSource
+
+    eventSource.onmessage = (event: MessageEvent<string>): void => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          type?: string
+          stage?: string
+          message?: string
+          payload?: { session_id?: string }
+        }
+        const message = payload.message || `${payload.type || 'status'}${payload.stage ? ` (${payload.stage})` : ''}`
+        const nextSessionId = payload.payload?.session_id || (payload as { session_id?: string }).session_id
+        setPrepEventLog((current) => [...current, message].slice(-20))
+        if (payload.type === 'done' && nextSessionId) {
+          void fetchResearchSession(nextSessionId)
+          setPrepInterviewLoading(false)
+          stopInterviewResearchStream()
+        }
+        if (payload.type === 'error') {
+          setPrepInterviewError(payload.message || 'Interview research failed.')
+          setPrepInterviewLoading(false)
+          stopInterviewResearchStream()
+        }
+      } catch {
+        setPrepEventLog((current) => [...current, 'Received malformed progress update.'].slice(-20))
+      }
+    }
+
+    eventSource.onerror = (): void => {
+      if (isStoppingPrepInterviewStreamRef.current) {
+        isStoppingPrepInterviewStreamRef.current = false
+        return
+      }
+      setPrepInterviewError('Interview prep stream disconnected. Try again.')
+      setPrepInterviewLoading(false)
+      stopInterviewResearchStream()
     }
   }
 
@@ -476,6 +554,12 @@ export default function JobDetails() {
     }
   }, [job?.id])
 
+  useEffect(() => {
+    return () => {
+      stopInterviewResearchStream()
+    }
+  }, [])
+
   if (loading) {
     return (
       <div className="max-w-6xl mx-auto px-8 py-10">
@@ -614,6 +698,33 @@ export default function JobDetails() {
 
         {/* Deep analysis trigger */}
         <div className="mt-3 pt-3 border-t border-border">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <button
+              type="button"
+              onClick={() => void handlePrepInterview()}
+              disabled={prepInterviewLoading}
+              className="btn-primary flex items-center gap-2 text-xs py-1.5 px-3 disabled:opacity-60"
+            >
+              {prepInterviewLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+              {prepInterviewLoading ? 'Preparing interview questions…' : 'Prep Interview'}
+            </button>
+            {prepResearchSession?.status ? <span className="text-[11px] text-text-muted">Last status: {prepResearchSession.status}</span> : null}
+          </div>
+
+          {prepInterviewError && <p className="text-xs text-red-500 mb-2">{prepInterviewError}</p>}
+
+          {prepEventLog.length > 0 ? (
+            <div className="mb-2 text-xs text-text-muted space-y-1">
+              {prepEventLog.map((eventLine, index) => (
+                <p key={`${eventLine}-${index}`} className="leading-relaxed">
+                  {eventLine}
+                </p>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-3 pt-3 border-t border-border">
           {!analysisResult && (
             <button
               type="button"
@@ -728,6 +839,78 @@ export default function JobDetails() {
               records={analysisResult.rewrite_suggestion_evidence}
               label="Rewrite suggestion evidence"
             />
+          </div>
+        )}
+
+        {prepResearchSession && (
+          <div className="mb-4 border-t border-border pt-3">
+            <div className="text-xs font-semibold text-text-primary mb-2">AI-prepared interview research</div>
+            <p className="text-[11px] text-text-muted mb-2">
+              {prepResearchSession.message}
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mb-2">
+              <div className="p-2 border border-border rounded text-[11px]">
+                Behavioral: {prepResearchSession.question_bank.behavioral.length}
+              </div>
+              <div className="p-2 border border-border rounded text-[11px]">
+                Technical: {prepResearchSession.question_bank.technical.length}
+              </div>
+              <div className="p-2 border border-border rounded text-[11px]">
+                System design: {prepResearchSession.question_bank.system_design.length}
+              </div>
+              <div className="p-2 border border-border rounded text-[11px]">
+                Company specific: {prepResearchSession.question_bank.company_specific.length}
+              </div>
+            </div>
+            <div className="space-y-3 mb-3">
+              {[
+                { label: 'Behavioral', items: prepResearchSession.question_bank.behavioral },
+                { label: 'Technical', items: prepResearchSession.question_bank.technical },
+                { label: 'System design', items: prepResearchSession.question_bank.system_design },
+                { label: 'Company specific', items: prepResearchSession.question_bank.company_specific },
+              ].map(({ label, items }) => {
+                const questions = items
+                if (!questions.length) return null
+                return (
+                  <div key={label}>
+                    <div className="text-[11px] font-semibold text-text-primary mb-1">{label}</div>
+                    <ul className="space-y-1.5">
+                      {questions.map((item, index) => (
+                        <li key={`${label}-${index}-${item.source_url}`} className="text-[11px] text-text-secondary">
+                          <div className="text-text-primary">
+                            {item.question_text || item.question}
+                          </div>
+                          {(item.reason || item.source_title) && (
+                            <div className="text-[10px] text-text-muted">
+                              {[item.reason, item.source_title].filter(Boolean).join(' · ')}
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )
+              })}
+            </div>
+            {prepResearchSession.question_bank.source_urls.length > 0 && (
+              <div className="text-xs">
+                <div className="font-semibold text-text-primary mb-1">Provenance</div>
+                <ul className="space-y-1">
+                  {prepResearchSession.question_bank.source_urls.map((url) => (
+                    <li key={url}>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sky-700 underline break-all"
+                      >
+                        {url}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 

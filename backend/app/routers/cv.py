@@ -7,6 +7,10 @@ import time
 from ..database import get_db
 from ..models.cv import CV
 from ..services.cv_parser import parse_cv
+from ..services.user_profile_extractor import (
+    extract_profile_from_cv_text,
+    upsert_user_profile_from_extraction,
+)
 
 router = APIRouter(prefix="/cv", tags=["cv"])
 logger = logging.getLogger(__name__)
@@ -69,6 +73,16 @@ async def upload_cv(file: UploadFile = File(...), db: Session = Depends(get_db))
     db.add(cv)
     db.commit()
     db.refresh(cv)
+    try:
+        extracted_profile = await extract_profile_from_cv_text(parsed_text)
+        upsert_user_profile_from_extraction(
+            db,
+            payload=extracted_profile,
+            source="cv_llm",
+        )
+    except Exception:
+        logger.exception("Failed to extract and persist user profile from CV")
+
     logger.info(
         "CV upload completed id=%s filename=%s parse_chars=%s duration_ms=%.1f",
         cv.id,
