@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # Local-context tooling
     local_context_environment: str = "dev"
 
+    # Local speech-to-text
+    stt_enabled: bool = True
+    stt_model_size: str = "base"
+    stt_device: str = "auto"
+    stt_compute_type: str = "int8"
+    stt_no_speech_threshold: float = 0.6
+
     model_config = ConfigDict(
         env_file=".env",
         extra="ignore",

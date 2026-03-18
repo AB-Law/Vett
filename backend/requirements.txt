@@ -28,3 +28,4 @@ apify-shared<2
 
 # Utilities
 aiofiles==25.1.0
+faster-whisper

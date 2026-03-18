@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from time import perf_counter
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -20,8 +22,15 @@ from ..services.interview_chat_service import (
     produce_assistant_reply,
     serialize_turn,
 )
+from ..services.stt_service import (
+    SttError,
+    SttNoSpeechError,
+    SttUnavailableError,
+    transcribe_audio_bytes,
+)
 
 router = APIRouter(prefix="/interview-chat", tags=["interview-chat"])
+logger = logging.getLogger(__name__)
 
 
 class InterviewChatSessionSummary(BaseModel):
@@ -66,6 +75,11 @@ class InterviewChatEndResponse(BaseModel):
 class InterviewChatDeleteResponse(BaseModel):
     session_id: str
     status: str
+
+
+class InterviewChatTranscriptionResponse(BaseModel):
+    transcript: str
+    latency_ms: int
 
 
 def _serialize_session(db: Session, session: InterviewChatSession, include_turns: bool) -> InterviewChatSessionDetail:
@@ -284,3 +298,61 @@ def delete_interview_session(job_id: int, session_id: str, db: Session = Depends
     db.delete(session)
     db.commit()
     return InterviewChatDeleteResponse(session_id=session_id, status="deleted")
+
+
+@router.post("/jobs/{job_id}/sessions/{session_id}/transcribe", response_model=InterviewChatTranscriptionResponse)
+async def transcribe_interview_audio(
+    job_id: int,
+    session_id: str,
+    audio_file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> InterviewChatTranscriptionResponse:
+    _load_job_or_404(db, job_id)
+    session = _load_session_or_404(db, job_id, session_id)
+    if session.status != "active":
+        raise HTTPException(status_code=400, detail="Interview session is not active")
+
+    request_started = perf_counter()
+    logger.info(
+        "stt.transcription_started session_id=%s filename=%s content_type=%s",
+        session.session_id,
+        audio_file.filename or "",
+        audio_file.content_type or "",
+    )
+
+    try:
+        payload = await audio_file.read()
+        suffix = ".webm"
+        if audio_file.filename and "." in audio_file.filename:
+            suffix = f".{audio_file.filename.rsplit('.', 1)[-1]}"
+        transcript, stt_latency_ms = transcribe_audio_bytes(audio_bytes=payload, suffix=suffix, language="en")
+        total_latency_ms = int((perf_counter() - request_started) * 1000)
+        logger.info(
+            "stt.transcription_success session_id=%s transcript_len=%s stt_latency_ms=%s total_latency_ms=%s",
+            session.session_id,
+            len(transcript),
+            stt_latency_ms,
+            total_latency_ms,
+        )
+        return InterviewChatTranscriptionResponse(transcript=transcript, latency_ms=stt_latency_ms)
+    except SttNoSpeechError as exc:
+        total_latency_ms = int((perf_counter() - request_started) * 1000)
+        logger.warning(
+            "stt.transcription_no_speech session_id=%s total_latency_ms=%s error=%s",
+            session.session_id,
+            total_latency_ms,
+            str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SttUnavailableError as exc:
+        logger.error("stt.transcription_unavailable session_id=%s error=%s", session.session_id, str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SttError as exc:
+        total_latency_ms = int((perf_counter() - request_started) * 1000)
+        logger.exception(
+            "stt.transcription_failed session_id=%s total_latency_ms=%s error=%s",
+            session.session_id,
+            total_latency_ms,
+            str(exc),
+        )
+        raise HTTPException(status_code=500, detail="Audio transcription failed") from exc
