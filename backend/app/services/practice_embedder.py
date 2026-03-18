@@ -145,10 +145,34 @@ def _prepare_document_rows_for_embedding(
     return scoped_rows
 
 
+def _embedded_chunk_count(db: Session, document_id: int) -> int:
+    return (
+        db.query(PracticeQuestion)
+        .filter(
+            PracticeQuestion.source_table == interview_docs.DOC_TABLE_NAME,
+            PracticeQuestion.source_id == document_id,
+            PracticeQuestion.embedding.isnot(None),
+        )
+        .count()
+    )
+
+
+def _recover_stale_processing_documents(db: Session) -> int:
+    documents = db.query(InterviewKnowledgeDocument).filter(InterviewKnowledgeDocument.status == "processing").all()
+    if not documents:
+        return 0
+    for document in documents:
+        document.status = "pending"
+        document.error_message = None
+    db.commit()
+    return len(documents)
+
+
 async def _embed_document_rows(
     db: Session,
     practice_rows: list[tuple[PracticeQuestion, str]],
     expected_model: str,
+    document: InterviewKnowledgeDocument | None = None,
 ) -> tuple[int, list[str]]:
     if not practice_rows:
         return 0, []
@@ -165,8 +189,10 @@ async def _embed_document_rows(
         question.embedding = result
         question.embedding_model = expected_model
         db.add(question)
+        if document is not None:
+            document.embedded_chunks = int(document.embedded_chunks or 0) + 1
+            db.add(document)
         embedded_count += 1
-    if embedded_count:
         db.commit()
     return embedded_count, failures
 
@@ -201,16 +227,26 @@ async def _run_interview_document_worker(db: Session, expected_model: str) -> in
 
     total_processed = 0
     for document in documents:
-        document.status = "processing"
-        db.add(document)
-        db.commit()
-
         chunks = interview_docs.chunk_interview_text(document.parsed_text)
         if not chunks:
             _mark_document_failed(document, ["no text parsed"])
+            document.total_chunks = 0
+            document.embedded_chunks = 0
+            document.parsed_word_count = 0
+            document.chunk_coverage_ratio = 0.0
             db.add(document)
             db.commit()
             continue
+
+        document.total_chunks = len(chunks)
+        integrity = interview_docs.chunk_integrity_stats(document.parsed_text)
+        document.parsed_word_count = int(integrity.get("parsed_word_count", 0) or 0)
+        document.chunk_coverage_ratio = float(integrity.get("coverage_ratio", 0.0) or 0.0)
+        document.embedded_chunks = _embedded_chunk_count(db, document.id)
+        document.status = "processing"
+        document.error_message = None
+        db.add(document)
+        db.commit()
 
         try:
             rows_to_embed = _prepare_document_rows_for_embedding(db, document)
@@ -221,15 +257,24 @@ async def _run_interview_document_worker(db: Session, expected_model: str) -> in
             db.commit()
             continue
 
-        success_count, failures = await _embed_document_rows(db, rows_to_embed, expected_model)
-        total_processed += success_count
         if not rows_to_embed:
-            document.status = "embedded"
-            document.error_message = None
+            if document.total_chunks and document.embedded_chunks >= document.total_chunks:
+                document.status = "embedded"
+                document.error_message = None
+            else:
+                document.status = "processing"
             db.add(document)
             db.commit()
             continue
 
+        success_count, failures = await _embed_document_rows(
+            db,
+            rows_to_embed,
+            expected_model,
+            document=document,
+        )
+        total_processed += success_count
+        document.embedded_chunks = _embedded_chunk_count(db, document.id)
         if failures:
             logger.debug("Interview embedding failures for doc %s: %s", document.id, "; ".join(failures))
             if success_count > 0:
@@ -285,6 +330,16 @@ async def run_embedding_worker() -> None:
     logger.info("Practice embedding worker started.")
     settings = get_settings()
     expected_model = settings.practice_embedding_model
+    try:
+        db = SessionLocal()
+        try:
+            recovered = _recover_stale_processing_documents(db)
+            if recovered:
+                logger.info("Recovered %d interview documents from stale processing state.", recovered)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Failed to recover stale interview documents.")
 
     while True:
         try:

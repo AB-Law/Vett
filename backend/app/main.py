@@ -6,6 +6,8 @@ import time
 from collections import OrderedDict
 
 from sqlalchemy import inspect, text
+
+sa_text = text
 from sqlalchemy.exc import OperationalError
 
 from .database import Base, SessionLocal, engine
@@ -373,6 +375,10 @@ def _ensure_interview_documents_columns() -> None:
             "source_ref": "VARCHAR(120)",
             "status": "VARCHAR(24)",
             "error_message": "TEXT",
+            "total_chunks": "INTEGER DEFAULT 0",
+            "embedded_chunks": "INTEGER DEFAULT 0",
+            "parsed_word_count": "INTEGER DEFAULT 0",
+            "chunk_coverage_ratio": "FLOAT DEFAULT 0",
             "created_by_user_id": "VARCHAR(120)",
         }
         for column_name, column_type in expected_columns.items():
@@ -389,6 +395,15 @@ def _ensure_interview_documents_columns() -> None:
             if index_name.strip('"') in indexes:
                 continue
             conn.execute(sa_text(f'CREATE INDEX IF NOT EXISTS {index_name} ON interview_knowledge_documents ("{column_name}");'))
+        conn.execute(
+            sa_text(
+                "UPDATE interview_knowledge_documents "
+                "SET total_chunks = COALESCE(total_chunks, 0), "
+                "    embedded_chunks = COALESCE(embedded_chunks, 0), "
+                "    parsed_word_count = COALESCE(parsed_word_count, 0), "
+                "    chunk_coverage_ratio = COALESCE(chunk_coverage_ratio, 0);"
+            )
+        )
 
 
 def _ensure_pgvector_index() -> None:

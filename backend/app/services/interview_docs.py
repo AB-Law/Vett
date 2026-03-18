@@ -38,8 +38,76 @@ def _word_chunks(text: str, chunk_size: int, overlap: int) -> list[str]:
     return chunks
 
 
+def _word_chunks_with_meta(text: str, chunk_size: int, overlap: int) -> list[tuple[int, int, str]]:
+    words = text.split()
+    if not words:
+        return []
+    stride = max(1, chunk_size - max(0, overlap))
+    chunks: list[tuple[int, int, str]] = []
+    for start in range(0, len(words), stride):
+        end = start + chunk_size
+        chunk_words = words[start:end]
+        if not chunk_words:
+            continue
+        chunk = " ".join(chunk_words).strip()
+        if chunk:
+            chunks.append((start, min(end, len(words)), chunk))
+        if end >= len(words):
+            break
+    return chunks
+
+
 def chunk_interview_text(text: str, chunk_size: int = DOC_CHUNK_WORDS, overlap: int = DOC_CHUNK_OVERLAP) -> list[str]:
     return _word_chunks((text or "").strip(), chunk_size=max(1, chunk_size), overlap=max(0, overlap))
+
+
+def chunk_interview_text_meta(
+    text: str,
+    chunk_size: int = DOC_CHUNK_WORDS,
+    overlap: int = DOC_CHUNK_OVERLAP,
+) -> list[tuple[int, int, str]]:
+    return _word_chunks_with_meta(
+        (text or "").strip(),
+        chunk_size=max(1, chunk_size),
+        overlap=max(0, overlap),
+    )
+
+
+def chunk_integrity_stats(
+    text: str,
+    chunk_size: int = DOC_CHUNK_WORDS,
+    overlap: int = DOC_CHUNK_OVERLAP,
+) -> dict[str, object]:
+    words = (text or "").strip().split()
+    if not words:
+        return {
+            "parsed_word_count": 0,
+            "chunk_count": 0,
+            "covered_word_count": 0,
+            "coverage_ratio": 0.0,
+            "chunk_word_slots": 0,
+            "has_gaps": False,
+            "duplicate_slots": 0,
+        }
+
+    chunks = chunk_interview_text_meta((text or "").strip(), chunk_size=chunk_size, overlap=overlap)
+    covered_indices: set[int] = set()
+    for start, end, _ in chunks:
+        for index in range(start, end):
+            covered_indices.add(index)
+
+    coverage_ratio = round(len(covered_indices) / len(words) * 100, 1)
+    chunk_word_slots = sum(max(0, end - start) for start, end, _ in chunks)
+    duplicate_slots = max(0, chunk_word_slots - len(covered_indices))
+    return {
+        "parsed_word_count": len(words),
+        "chunk_count": len(chunks),
+        "covered_word_count": len(covered_indices),
+        "coverage_ratio": coverage_ratio,
+        "chunk_word_slots": chunk_word_slots,
+        "has_gaps": len(covered_indices) < len(words),
+        "duplicate_slots": duplicate_slots,
+    }
 
 
 def make_source_window(chunk_index: int) -> str:

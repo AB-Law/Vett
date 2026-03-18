@@ -25,7 +25,7 @@ from ..models.score import Job, RescoreRun, ScrapeRequest
 from ..models.score import AGENT_STATE_COMPLETED, AGENT_STATE_FAILED
 from ..models.interview import InterviewKnowledgeDocument
 from ..services.cv_parser import parse_cv
-from ..services.interview_docs import build_parser_signature
+from ..services.interview_docs import build_parser_signature, chunk_interview_text, chunk_integrity_stats
 
 logger = logging.getLogger(__name__)
 
@@ -476,6 +476,9 @@ class InterviewKnowledgeDocumentResponse(BaseModel):
     error_message: str | None
     parser_version: str | None
     source_ref: str | None
+    total_chunks: int
+    embedded_chunks: int
+    parsed_word_count: int
     created_at: str
     created_by_user_id: str | None
 
@@ -494,6 +497,9 @@ def _serialize_job_document(document: InterviewKnowledgeDocument) -> InterviewKn
         error_message=document.error_message,
         parser_version=document.parser_version,
         source_ref=document.source_ref,
+        total_chunks=int(document.total_chunks or 0),
+        embedded_chunks=int(document.embedded_chunks or 0),
+        parsed_word_count=int(document.parsed_word_count or 0),
         created_at=str(document.created_at),
         created_by_user_id=document.created_by_user_id,
     )
@@ -503,10 +509,12 @@ def _parse_document_upload(file: UploadFile) -> tuple[str, str]:
     filename = (file.filename or "interview-doc.txt").strip()
     suffix = Path(filename).suffix.lower()
     if suffix not in DOCUMENT_ALLOWED_EXTENSIONS:
+        logger.warning("Rejected job interview document upload: filename=%s extension=%s", filename, suffix)
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type. Allowed: {', '.join(sorted(DOCUMENT_ALLOWED_EXTENSIONS))}",
         )
+    logger.info("Accepted job interview document upload filename=%s extension=%s", filename, suffix)
     return filename, suffix
 
 
@@ -808,29 +816,54 @@ async def upload_job_interview_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
+    start_ts = time.perf_counter()
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
+        logger.warning("Job interview document upload failed: job not found job_id=%s", job_id)
         raise HTTPException(404, "Job not found")
 
     filename, suffix = _parse_document_upload(file)
     data = await file.read()
+    logger.info(
+        "Starting parse for job interview document job_id=%s filename=%s size=%s content_type=%s",
+        job_id,
+        filename,
+        len(data),
+        file.content_type,
+    )
 
     status = "pending"
     error_message: str | None = None
     try:
+        parse_start = time.perf_counter()
         parsed_text = parse_cv(data, filename)
+        logger.info(
+            "Parsed job interview document job_id=%s filename=%s parsed_chars=%s duration_ms=%.1f",
+            job_id,
+            filename,
+            len(parsed_text),
+            (time.perf_counter() - parse_start) * 1000,
+        )
     except ValueError as exc:
         parsed_text = ""
         status = "failed"
         error_message = str(exc)
+        logger.warning(
+            "Job interview document failed validation job_id=%s filename=%s error=%s",
+            job_id,
+            filename,
+            error_message,
+        )
     except Exception as exc:
         parsed_text = ""
         status = "failed"
         error_message = f"Upload failed: {exc}"
+        logger.exception("Job interview document parse failed job_id=%s filename=%s", job_id, filename)
 
     if not parsed_text.strip() and status == "pending":
         status = "failed"
         error_message = "No text could be extracted from this document."
+        logger.warning("Job interview document parse produced no text job_id=%s filename=%s", job_id, filename)
 
     document = InterviewKnowledgeDocument(
         owner_type="job",
@@ -838,6 +871,10 @@ async def upload_job_interview_document(
         source_filename=filename,
         content_type=(suffix[1:] if suffix else "txt"),
         parsed_text=parsed_text,
+        total_chunks=len(chunk_interview_text(parsed_text)),
+        embedded_chunks=0,
+        parsed_word_count=len((parsed_text or "").strip().split()),
+        chunk_coverage_ratio=chunk_integrity_stats(parsed_text).get("coverage_ratio", 0.0),
         parser_version=build_parser_signature(),
         source_ref=build_parser_signature(),
         status=status,
@@ -846,6 +883,13 @@ async def upload_job_interview_document(
     db.add(document)
     db.commit()
     db.refresh(document)
+    logger.info(
+        "Persisted job interview document job_id=%s document_id=%s status=%s duration_ms=%.1f",
+        job_id,
+        document.id,
+        status,
+        (time.perf_counter() - start_ts) * 1000,
+    )
     return _serialize_job_document(document)
 
 

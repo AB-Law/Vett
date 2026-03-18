@@ -221,6 +221,24 @@ export interface InterviewKnowledgeDocument {
   source_ref: string | null
   created_at: string
   created_by_user_id: string | null
+  total_chunks: number
+  embedded_chunks: number
+  parsed_word_count: number
+}
+
+export interface InterviewKnowledgeDocumentProgress {
+  id: number
+  owner_type: 'global' | 'job'
+  job_id: number | null
+  source_filename: string
+  status: string
+  total_chunks: number
+  embedded_chunks: number
+  progress_percent: number
+  error_message: string | null
+  parsed_word_count: number
+  created_at: string
+  created_by_user_id: string | null
 }
 
 export const getSettings = async (): Promise<AppSettings> => {
@@ -244,6 +262,11 @@ export const getEmbeddingProgress = async (): Promise<{ total: number; embedded:
 
 export const getInterviewDocuments = async (): Promise<InterviewKnowledgeDocument[]> => {
   const { data } = await api.get<InterviewKnowledgeDocument[]>('/settings/interview-documents')
+  return data
+}
+
+export const getInterviewDocumentProgress = async (): Promise<InterviewKnowledgeDocumentProgress[]> => {
+  const { data } = await api.get<InterviewKnowledgeDocumentProgress[]>('/settings/interview-documents/progress')
   return data
 }
 
