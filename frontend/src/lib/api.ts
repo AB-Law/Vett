@@ -209,6 +209,31 @@ export interface AppSettings {
   has_azure_key: boolean
 }
 
+export interface CandidateProfile {
+  id: number | null
+  full_name: string
+  headline_or_target_role: string
+  current_company: string
+  years_experience: number | null
+  top_skills: string[]
+  location: string
+  linkedin_url: string
+  summary: string
+  source: string
+}
+
+export interface CandidateProfileUpdate {
+  full_name?: string
+  headline_or_target_role?: string
+  current_company?: string
+  years_experience?: number | null
+  top_skills?: string[]
+  location?: string
+  linkedin_url?: string
+  summary?: string
+  source?: string
+}
+
 export interface InterviewKnowledgeDocument {
   id: number
   owner_type: 'global' | 'job'
@@ -248,6 +273,16 @@ export const getSettings = async (): Promise<AppSettings> => {
 
 export const updateSettings = async (settings: Partial<AppSettings> & { [k: string]: unknown }): Promise<void> => {
   await api.post('/settings/', settings)
+}
+
+export const getUserProfile = async (): Promise<CandidateProfile> => {
+  const { data } = await api.get<CandidateProfile>('/profile/')
+  return data
+}
+
+export const updateUserProfile = async (payload: CandidateProfileUpdate): Promise<CandidateProfile> => {
+  const { data } = await api.post<CandidateProfile>('/profile/', payload)
+  return data
 }
 
 export const testConnection = async (): Promise<{ ok: boolean; reply?: string; error?: string }> => {

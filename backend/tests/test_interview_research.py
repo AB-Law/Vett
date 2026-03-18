@@ -2,18 +2,25 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+from app.database import Base
 from app.config import get_settings
 from app.services.interview_research.models import InterviewResearchQuestion, InterviewResearchQuestionBank
 from app.services.interview_research.orchestrator import (
     _apply_minimums,
+    _extract_candidate_profile_context,
+    _fallback_questions_for_category,
     _deterministic_critic_decision,
     _parse_or_plan,
 )
 from app.services.interview_research.searxng_client import SearXNGClient
 from app.services.interview_research.tools import search_web
+from app.models.user_profile import UserProfile
 
 
 @pytest.mark.asyncio
@@ -137,3 +144,57 @@ def test_deterministic_critic_rejects_low_signal_sources():
     )
     assert keep2 is True
     assert reason2 == "context_aligned"
+
+
+def _new_db_session():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
+
+
+def test_extract_candidate_profile_context_prefers_stored_profile():
+    db = _new_db_session()
+    db.add(
+        UserProfile(
+            full_name="Ada Lovelace",
+            headline_or_target_role="Research Engineer",
+            current_company="NexGen Labs",
+            years_experience=7,
+            top_skills=["Python"],
+            location="London",
+            linkedin_url="https://example.com/ada",
+            summary="Deep systems background.",
+            source="manual",
+        )
+    )
+    db.commit()
+    company, summary = _extract_candidate_profile_context(db, "Experience at Old Corp")
+    assert company == "NexGen Labs"
+    assert summary == "Deep systems background."
+
+
+def test_extract_candidate_profile_context_fallbacks_to_cv_text():
+    db = _new_db_session()
+    cv_text = "Software Developer at Fallbackly\nExperienced in Python."
+    company, summary = _extract_candidate_profile_context(db, cv_text)
+    assert company == "Fallbackly"
+    assert "Software Developer at Fallbackly Experienced in Python." in summary
+
+
+def test_company_specific_fallback_questions_are_answerable_without_inside_access():
+    questions = _fallback_questions_for_category(
+        category="company_specific",
+        role="Backend Engineer",
+        company="Digitap.ai",
+        count=3,
+        candidate_company="PwC India",
+    )
+    assert len(questions) == 3
+    combined = " ".join(questions).lower()
+    assert "public information" in combined
+    assert "unknowns" in combined
+    assert "evaluate engineering culture and execution differences" not in combined

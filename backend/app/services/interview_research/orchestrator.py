@@ -18,6 +18,7 @@ from ...config import get_settings
 from ..llm import _get_llm_semaphore, _get_litellm_model
 from ...models.score import Job
 from ...models.cv import CV
+from ...models.user_profile import UserProfile
 from .models import InterviewResearchQuestion, InterviewResearchQuestionBank, InterviewResearchResult
 from .tools import (
     extract_candidate_profile,
@@ -1544,22 +1545,36 @@ def _dedupe(bank: InterviewResearchQuestionBank) -> None:
             bucket.extend(items)
 
 
-def _extract_candidate_company_from_profile(profile_text: str) -> str:
+def _extract_candidate_profile_context(
+    db: Session,
+    profile_text: str,
+) -> tuple[str, str]:
+    profile = db.query(UserProfile).order_by(UserProfile.id.asc()).first()
+    if profile is not None:
+        candidate_company = _clean(profile.current_company or "")
+        candidate_summary = _clean(profile.summary or "")
+        if candidate_company or candidate_summary:
+            return candidate_company, candidate_summary
+
+    # Fallback only when there is no persisted profile row yet.
     text = _clean(profile_text)
     if not text:
-        return ""
+        return "", ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     pattern = re.compile(
         r"\bat\s+([A-Z][A-Za-z0-9&.,\- ]{2,60}?)(?:\s*\||\s*[-–]\s*|\s*\(|\s*$)"
     )
+    company = ""
     for line in lines[:80]:
         match = pattern.search(line)
         if not match:
             continue
         candidate = _clean(match.group(1)).strip(" -|,.;")
         if len(candidate) >= 3:
-            return candidate
-    return ""
+            company = candidate
+            break
+    summary = _clean(" ".join(lines[:10]))
+    return company, summary
 
 
 def _fallback_questions_for_category(
@@ -1593,9 +1608,9 @@ def _fallback_questions_for_category(
             "Explain how you would model data consistency with eventual updates.",
         ],
         "company_specific": [
-            f"Based on your backend experience at {prior_company}, which engineering choices would you prioritize first at {target_company}?",
-            f"Which fintech domain constraints from {prior_company} are most transferable to {target_company}'s onboarding and verification workflows?",
-            f"How would you evaluate engineering culture and execution differences between {prior_company} and {target_company}?",
+            f"Based on your backend experience at {prior_company}, what assumptions would you validate first before proposing changes at {target_company}?",
+            f"Which fintech constraints from {prior_company} seem transferable to {target_company}'s onboarding and verification workflows, and which would you re-validate?",
+            f"Using the role brief and public information, what 30-60 day engineering plan would you propose for {target_company}, and what unknowns would you flag early?",
         ],
     }
     return templates.get(category, [])[:count]
@@ -1681,12 +1696,13 @@ async def run_llm_research_agent(
     job_text = _clean(run_context.job.description if run_context.job else "")
     latest_cv = db.query(CV).order_by(CV.id.desc()).first()
     profile_text = _clean(latest_cv.parsed_text if latest_cv else "")
-    candidate_company = _extract_candidate_company_from_profile(profile_text)
+    candidate_company, resolved_profile_summary = _extract_candidate_profile_context(db, profile_text)
+    profile_text_for_planner = resolved_profile_summary or profile_text
     _log_stage(
         "run_llm_research_agent",
         "resolved context",
         job_text_len=len(job_text),
-        has_profile=bool(profile_text),
+        has_profile=bool(profile_text_for_planner),
         tool_timeout_seconds=tool_timeout_seconds,
         overall_timeout_seconds=timeout_seconds,
         blocked_domains_count=len((settings.interview_research_blocked_domains or "").split(",")),
@@ -1734,7 +1750,7 @@ async def run_llm_research_agent(
             role=role,
             company=company,
             job_text=job_text,
-            profile_text=profile_text,
+            profile_text=profile_text_for_planner,
             jd_facts=jd_facts,
             emit=emit,
             timeout_seconds=PLANNER_TIMEOUT_SECONDS,
@@ -1747,7 +1763,7 @@ async def run_llm_research_agent(
             role=role,
             company=company,
             job=run_context.job,
-            profile_text=profile_text,
+            profile_text=profile_text_for_planner,
             plan=plan,
             emit=emit,
             timeout_seconds=tool_timeout_seconds,

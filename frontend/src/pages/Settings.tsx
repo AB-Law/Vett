@@ -12,10 +12,23 @@ import {
   type AppSettings,
   type InterviewKnowledgeDocument,
   type InterviewKnowledgeDocumentProgress,
+  getUserProfile,
+  updateUserProfile,
+  type CandidateProfile,
 } from '../lib/api'
 import toast from 'react-hot-toast'
 
 type Provider = 'claude' | 'openai' | 'azure_openai' | 'ollama' | 'lm_studio'
+type CandidateProfileForm = {
+  full_name: string
+  headline_or_target_role: string
+  current_company: string
+  years_experience: string
+  top_skills: string
+  location: string
+  linkedin_url: string
+  summary: string
+}
 type InterviewDocumentWithProgress = {
   id: number
   owner_type: 'global' | 'job'
@@ -52,6 +65,18 @@ export default function Settings() {
   const [interviewDocuments, setInterviewDocuments] = useState<InterviewDocumentWithProgress[]>([])
   const [documentsLoading, setDocumentsLoading] = useState(false)
   const [uploadingDocument, setUploadingDocument] = useState(false)
+  const [candidateProfile, setCandidateProfile] = useState<CandidateProfileForm>({
+    full_name: '',
+    headline_or_target_role: '',
+    current_company: '',
+    years_experience: '',
+    top_skills: '',
+    location: '',
+    linkedin_url: '',
+    summary: '',
+  })
+  const [loadingCandidateProfile, setLoadingCandidateProfile] = useState(false)
+  const [savingCandidateProfile, setSavingCandidateProfile] = useState(false)
   const documentsPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const progressPercent = useCallback((embeddedChunks: number, totalChunks: number): number => {
@@ -125,10 +150,17 @@ export default function Settings() {
   useEffect(() => {
     setLoading(true)
     setDocumentsLoading(true)
+    setLoadingCandidateProfile(true)
     const load = async () => {
       try {
-        const [s, ep, docs] = await Promise.all([getSettings(), getEmbeddingProgress(), getInterviewDocumentProgress()])
+        const [s, ep, docs, profile] = await Promise.all([
+          getSettings(),
+          getEmbeddingProgress(),
+          getInterviewDocumentProgress(),
+          getUserProfile(),
+        ])
         const mappedDocs = docs.map(toDocumentWithProgress)
+        const profileForm = toCandidateProfileForm(profile)
 
         setSettings(s)
         setActiveProvider(s.active_provider as Provider)
@@ -145,12 +177,15 @@ export default function Settings() {
         })
         setEmbeddingProgress(ep)
         setInterviewDocuments(mappedDocs)
+        setCandidateProfile(profileForm)
+        setLoadingCandidateProfile(false)
         if (mappedDocs.some((doc) => isDocumentInProgress(doc.status)) || ep.percent < 100) {
           ensureDocumentPolling()
         }
       } finally {
         setLoading(false)
         setDocumentsLoading(false)
+        setLoadingCandidateProfile(false)
       }
     }
 
@@ -162,6 +197,20 @@ export default function Settings() {
   }, [])
 
   const set = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }))
+  const setProfileField = useCallback((key: keyof CandidateProfileForm, value: string) => {
+    setCandidateProfile((previous) => ({ ...previous, [key]: value }))
+  }, [])
+
+  const toCandidateProfileForm = useCallback((profile: CandidateProfile): CandidateProfileForm => ({
+    full_name: profile.full_name || '',
+    headline_or_target_role: profile.headline_or_target_role || '',
+    current_company: profile.current_company || '',
+    years_experience: profile.years_experience == null ? '' : String(profile.years_experience),
+    top_skills: profile.top_skills?.join(', ') || '',
+    location: profile.location || '',
+    linkedin_url: profile.linkedin_url || '',
+    summary: profile.summary || '',
+  }), [])
 
   const statusClass = (status: string): string => {
     const normalized = status.toLowerCase()
@@ -226,6 +275,33 @@ export default function Settings() {
       toast.error('Failed to save settings')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSaveProfile = async () => {
+    setSavingCandidateProfile(true)
+    try {
+      const yearsText = candidateProfile.years_experience.trim()
+      const yearsNumber = yearsText === '' ? null : Number(yearsText)
+      const payload = {
+        full_name: candidateProfile.full_name.trim(),
+        headline_or_target_role: candidateProfile.headline_or_target_role.trim(),
+        current_company: candidateProfile.current_company.trim(),
+        years_experience: Number.isNaN(yearsNumber) ? null : yearsNumber,
+        top_skills: candidateProfile.top_skills
+          .split(',')
+          .map((skill) => skill.trim())
+          .filter((skill) => skill),
+        location: candidateProfile.location.trim(),
+        linkedin_url: candidateProfile.linkedin_url.trim(),
+        summary: candidateProfile.summary.trim(),
+      }
+      await updateUserProfile(payload)
+      toast.success('Candidate profile saved')
+    } catch {
+      toast.error('Failed to save candidate profile')
+    } finally {
+      setSavingCandidateProfile(false)
     }
   }
 
@@ -415,6 +491,55 @@ export default function Settings() {
             <option value="markdown">Markdown</option>
             <option value="pdf">PDF</option>
           </select>
+        </div>
+      </div>
+
+      {/* Candidate Profile */}
+      <div className="card p-5 mb-5">
+        <div className="flex items-center gap-2 mb-4">
+          <CheckCircle2 className="w-4 h-4 text-text-secondary" />
+          <h2 className="section-title">Candidate Profile</h2>
+        </div>
+        <div className="space-y-3">
+          <Field label="Full Name" value={candidateProfile.full_name} onChange={(v) => setProfileField('full_name', v)}
+            placeholder="Your full name" />
+          <Field label="Headline / Target Role" value={candidateProfile.headline_or_target_role}
+            onChange={(v) => setProfileField('headline_or_target_role', v)}
+            placeholder="e.g. Senior Backend Engineer" />
+          <Field label="Current Company" value={candidateProfile.current_company}
+            onChange={(v) => setProfileField('current_company', v)}
+            placeholder="Current or last company" />
+          <Field label="Years of Experience" value={candidateProfile.years_experience}
+            onChange={(v) => setProfileField('years_experience', v)}
+            placeholder="e.g. 4" />
+          <Field label="Top Skills" value={candidateProfile.top_skills} onChange={(v) => setProfileField('top_skills', v)}
+            placeholder="Python, FastAPI, PostgreSQL" />
+          <Field label="Location" value={candidateProfile.location}
+            onChange={(v) => setProfileField('location', v)}
+            placeholder="City, Country" />
+          <Field label="LinkedIn URL" value={candidateProfile.linkedin_url}
+            onChange={(v) => setProfileField('linkedin_url', v)}
+            placeholder="https://www.linkedin.com/in/your-profile" />
+          <div>
+            <label className="label">Summary</label>
+            <textarea
+              className="input min-h-24"
+              value={candidateProfile.summary}
+              onChange={(e) => setProfileField('summary', e.target.value)}
+              placeholder="Brief profile summary"
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end mt-4">
+          <button
+            onClick={handleSaveProfile}
+            disabled={savingCandidateProfile || loadingCandidateProfile}
+            className="btn-secondary flex items-center gap-2"
+          >
+            {savingCandidateProfile ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+            Save Candidate Profile
+          </button>
         </div>
       </div>
 
