@@ -160,3 +160,37 @@ async def test_end_interview_triggers_story4_handoff(monkeypatch):
     assert result.status == "completed"
     assert result.handoff_status == "triggered"
     assert result.handoff_run_id == "run_story4_123"
+    assert isinstance(result.feedback, dict)
+    assert "overview" in result.feedback
+
+
+def test_delete_interview_session_removes_transcript_rows():
+    db = _new_db_session()
+    job = Job(title="Backend Engineer", company="Acme", description="Build APIs.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    session_row = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+    assert session_row is not None
+    db.add(
+        InterviewChatTurn(
+            session_id=session_row.id,
+            turn_index=1,
+            speaker="assistant",
+            turn_type="question",
+            content="Tell me about an API you built.",
+            tool_calls=[],
+            context_sources=[],
+        )
+    )
+    db.commit()
+
+    delete_result = interview_chat_router.delete_interview_session(job.id, session.session_id, db=db)
+    assert delete_result.status == "deleted"
+
+    remaining_session = db.query(InterviewChatSession).filter(InterviewChatSession.session_id == session.session_id).first()
+    remaining_turns = db.query(InterviewChatTurn).all()
+    assert remaining_session is None
+    assert remaining_turns == []

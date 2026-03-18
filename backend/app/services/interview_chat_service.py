@@ -102,11 +102,39 @@ def _extract_job_requirements(job: Job) -> list[str]:
     text = _clean(job.description)
     if not text:
         return []
-    bullets = [line.strip("-• ").strip() for line in text.splitlines() if line.strip()]
-    picked = [line for line in bullets if len(line) > 24][:16]
+
+    chunks: list[str] = []
+    for line in text.splitlines():
+        cleaned = _single_line(line.strip("-• ").strip())
+        if not cleaned:
+            continue
+        if len(cleaned) <= 220:
+            chunks.append(cleaned)
+            continue
+        for part in re.split(r"[.?!;]\s+", cleaned):
+            part_clean = _single_line(part)
+            if part_clean:
+                chunks.append(part_clean)
+
+    picked: list[str] = []
+    picked_lower: set[str] = set()
+    for chunk in chunks:
+        # Keep requirement-like snippets and drop giant JD blobs that produce unusable prompts.
+        if not (24 <= len(chunk) <= 170):
+            continue
+        if len(chunk.split()) > 26:
+            continue
+        lower = chunk.lower()
+        if lower in picked_lower:
+            continue
+        picked.append(chunk)
+        picked_lower.add(lower)
+        if len(picked) >= 16:
+            break
+
     if picked:
         return picked
-    return re.split(r"[.?!]\s+", _single_line(text))[:12]
+    return [part for part in re.split(r"[.?!]\s+", _single_line(text)) if len(part) >= 24][:12]
 
 
 def _extract_cv_signals(db: Session) -> list[str]:
@@ -272,6 +300,113 @@ def _is_vague_answer(message: str) -> bool:
     return any(marker in text for marker in VAGUE_MARKERS)
 
 
+def _has_measurable_outcome(message: str) -> bool:
+    text = _single_line(message).lower()
+    has_number = any(char.isdigit() for char in text)
+    if not has_number:
+        return False
+    if "%" in text:
+        return True
+    measurable_markers = (
+        "x",
+        "ms",
+        "sec",
+        "seconds",
+        "minutes",
+        "hours",
+        "days",
+        "weeks",
+        "months",
+        "years",
+        "users",
+        "requests",
+        "tickets",
+        "incidents",
+        "sprints",
+        "releases",
+        "points",
+    )
+    return any(marker in text for marker in measurable_markers)
+
+
+def _build_intermediate_acknowledgement(message: str, *, category: str) -> str:
+    terms = _keyword_terms(message, limit=3)
+    if terms:
+        joined = ", ".join(terms)
+        return f"Thanks, that gives good signal on your {category.replace('_', ' ')} depth, especially around {joined}."
+    return f"Thanks, that helps me understand your {category.replace('_', ' ')} approach."
+
+
+def _build_interview_feedback(transcript_rows: list[InterviewChatTurn]) -> dict[str, object]:
+    user_answers = [row for row in transcript_rows if row.speaker == "user" and row.turn_type == "answer"]
+    assistant_follow_ups = [row for row in transcript_rows if row.speaker == "assistant" and row.turn_type == "follow_up"]
+
+    if not user_answers:
+        return {
+            "overview": "The interview ended before enough candidate responses were captured for a full assessment.",
+            "what_went_well": ["You started the session and engaged with the interviewer flow."],
+            "what_to_improve": ["Complete more questions so we can evaluate communication, depth, and impact."],
+            "next_steps": ["Run another round and answer at least 4-5 questions with concrete examples."],
+        }
+
+    measurable_count = 0
+    vague_count = 0
+    star_like_count = 0
+    total_words = 0
+    for row in user_answers:
+        content = _single_line(row.content)
+        total_words += len(content.split())
+        if _has_measurable_outcome(content):
+            measurable_count += 1
+        if _is_vague_answer(content):
+            vague_count += 1
+        lowered = content.lower()
+        if "situation" in lowered or "task" in lowered or "action" in lowered or "result" in lowered:
+            star_like_count += 1
+
+    answer_count = len(user_answers)
+    avg_words = total_words / answer_count if answer_count else 0.0
+    overview = (
+        f"You answered {answer_count} question(s) with an average of {int(avg_words)} words per response. "
+        f"{measurable_count} answer(s) included measurable outcomes."
+    )
+
+    went_well: list[str] = []
+    if measurable_count > 0:
+        went_well.append("You used quantifiable impact in parts of your answers, which improves credibility.")
+    if avg_words >= 90:
+        went_well.append("You provided reasonably detailed context instead of one-line answers.")
+    if star_like_count > 0:
+        went_well.append("You showed structured thinking (STAR-style framing) in at least some responses.")
+    if not went_well:
+        went_well.append("You maintained engagement and responded consistently across the interview.")
+
+    to_improve: list[str] = []
+    if vague_count > 0:
+        to_improve.append("Some responses were too broad; add concrete actions, constraints, and your exact role.")
+    if measurable_count < max(1, answer_count // 2):
+        to_improve.append("Add more metrics (%, latency, throughput, incidents, time/cost impact) in each answer.")
+    if avg_words < 60:
+        to_improve.append("Increase depth by covering problem context, decision trade-offs, and final outcomes.")
+    if not to_improve:
+        to_improve.append("Keep tightening each answer to focus on your direct ownership and decision quality.")
+
+    next_steps = [
+        "Practice 3 STAR stories with explicit metrics and trade-offs.",
+        "For technical answers, include architecture choices and why alternatives were rejected.",
+        "Run another round and aim to reduce follow-up clarifications from the interviewer.",
+    ]
+    if assistant_follow_ups:
+        next_steps[2] = f"Run another round and reduce follow-up clarifications (current round had {len(assistant_follow_ups)})."
+
+    return {
+        "overview": overview,
+        "what_went_well": went_well[:3],
+        "what_to_improve": to_improve[:3],
+        "next_steps": next_steps[:3],
+    }
+
+
 async def _query_vector_context(db: Session, *, job_id: int, query: str) -> tuple[list[str], dict[str, object]]:
     if not _clean(query):
         return [], {"tool": "query_vector_store", "status": "skipped", "result_count": 0}
@@ -365,6 +500,7 @@ async def produce_assistant_reply(
     replies: list[AssistantReply] = []
 
     turns = list_turns(db, session)
+    last_assistant_turn_type = next((turn.turn_type for turn in reversed(turns) if turn.speaker == "assistant"), "")
     if not turns and not safe_message:
         category, question = _question_text(session)
         opening = _opening_line(job)
@@ -393,7 +529,7 @@ async def produce_assistant_reply(
         replies.append(AssistantReply(text=answer, turn_type="follow_up", tool_calls=tool_calls, context_sources=context_sources))
         return replies
 
-    if _is_vague_answer(safe_message):
+    if _is_vague_answer(safe_message) and last_assistant_turn_type != "follow_up":
         category, _ = _question_text(session)
         context_sources, tool_calls = await build_context_tools(db, job=job, query=safe_message)
         probe = (
@@ -404,7 +540,33 @@ async def produce_assistant_reply(
         session.updated_at = datetime.utcnow()
         return replies
 
+    current_category, _ = _question_text(session)
+    if (
+        safe_message
+        and current_category in {"behavioral", "technical"}
+        and not _has_measurable_outcome(safe_message)
+        and last_assistant_turn_type != "follow_up"
+    ):
+        category, _ = _question_text(session)
+        context_sources, tool_calls = await build_context_tools(db, job=job, query=safe_message)
+        probe = (
+            f"Thanks. One quick follow-up before we move on from {category.replace('_', ' ')}: "
+            "what measurable outcome did you drive (for example %, latency, throughput, cost, or incidents)?"
+        )
+        replies.append(AssistantReply(text=probe, turn_type="follow_up", tool_calls=tool_calls, context_sources=context_sources))
+        session.updated_at = datetime.utcnow()
+        return replies
+
     previous_category, _ = _question_text(session)
+    if safe_message:
+        replies.append(
+            AssistantReply(
+                text=_build_intermediate_acknowledgement(safe_message, category=previous_category),
+                turn_type="transition",
+                tool_calls=[],
+                context_sources=[],
+            )
+        )
     session.current_question_index += 1
     next_category, next_question = _question_text(session)
     if next_category == "closing":
@@ -428,9 +590,16 @@ async def produce_assistant_reply(
 
 async def end_session_and_trigger_handoff(db: Session, *, session: InterviewChatSession, job: Job) -> dict[str, object]:
     if session.status == "completed":
-        return {"status": "already_completed", "handoff_run_id": session.handoff_run_id}
+        metadata = dict(session.session_metadata or {})
+        existing_feedback = metadata.get("feedback")
+        return {
+            "status": "already_completed",
+            "handoff_run_id": session.handoff_run_id,
+            "feedback": existing_feedback if isinstance(existing_feedback, dict) else None,
+        }
 
     transcript_rows = list_turns(db, session)
+    feedback = _build_interview_feedback(transcript_rows)
     transcript_lines = [f"{row.speaker}:{row.turn_type}:{_single_line(row.content)}" for row in transcript_rows]
     transcript_text = "\n".join(transcript_lines)[-7000:]
     cv = db.query(CV).order_by(CV.created_at.desc(), CV.id.desc()).first()
@@ -465,7 +634,8 @@ async def end_session_and_trigger_handoff(db: Session, *, session: InterviewChat
     metadata = dict(session.session_metadata or {})
     metadata["story4_scoring_triggered"] = handoff_status == "triggered"
     metadata["transcript_turn_count"] = len(transcript_rows)
+    metadata["feedback"] = feedback
     session.session_metadata = metadata
     db.add(session)
     db.flush()
-    return {"status": handoff_status, "handoff_run_id": handoff_run_id}
+    return {"status": handoff_status, "handoff_run_id": handoff_run_id, "feedback": feedback}

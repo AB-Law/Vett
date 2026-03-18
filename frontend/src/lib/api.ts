@@ -381,7 +381,15 @@ export interface InterviewChatSession {
 
 export interface InterviewChatSessionDetail extends InterviewChatSession {
   job_id: number
+  feedback?: InterviewChatFeedback | null
   turns: InterviewChatTurn[]
+}
+
+export interface InterviewChatFeedback {
+  overview: string
+  what_went_well: string[]
+  what_to_improve: string[]
+  next_steps: string[]
 }
 
 export const listInterviewChatSessions = async (jobId: number): Promise<InterviewChatSession[]> => {
@@ -468,9 +476,31 @@ export const streamInterviewChatTurn = async (
 export const endInterviewChatSession = async (
   jobId: number,
   sessionId: string,
-): Promise<{ session_id: string; status: string; handoff_status: string; handoff_run_id: string | null }> => {
-  const { data } = await api.post<{ session_id: string; status: string; handoff_status: string; handoff_run_id: string | null }>(
+): Promise<{
+  session_id: string
+  status: string
+  handoff_status: string
+  handoff_run_id: string | null
+  feedback: InterviewChatFeedback | null
+}> => {
+  const { data } = await api.post<{
+    session_id: string
+    status: string
+    handoff_status: string
+    handoff_run_id: string | null
+    feedback: InterviewChatFeedback | null
+  }>(
     `/interview-chat/jobs/${jobId}/sessions/${sessionId}/end`,
+  )
+  return data
+}
+
+export const deleteInterviewChatSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<{ session_id: string; status: string }> => {
+  const { data } = await api.delete<{ session_id: string; status: string }>(
+    `/interview-chat/jobs/${jobId}/sessions/${sessionId}`,
   )
   return data
 }

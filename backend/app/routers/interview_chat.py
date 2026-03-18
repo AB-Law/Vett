@@ -38,6 +38,7 @@ class InterviewChatSessionSummary(BaseModel):
 
 class InterviewChatSessionDetail(InterviewChatSessionSummary):
     job_id: int
+    feedback: dict[str, object] | None = None
     turns: list[dict[str, object]] = Field(default_factory=list)
 
 
@@ -54,10 +55,18 @@ class InterviewChatEndResponse(BaseModel):
     status: str
     handoff_status: str
     handoff_run_id: str | None = None
+    feedback: dict[str, object] | None = None
+
+
+class InterviewChatDeleteResponse(BaseModel):
+    session_id: str
+    status: str
 
 
 def _serialize_session(db: Session, session: InterviewChatSession, include_turns: bool) -> InterviewChatSessionDetail:
     turns = list_turns(db, session)
+    metadata = dict(session.session_metadata or {})
+    feedback = metadata.get("feedback")
     return InterviewChatSessionDetail(
         session_id=session.session_id,
         label=session.label,
@@ -69,6 +78,7 @@ def _serialize_session(db: Session, session: InterviewChatSession, include_turns
         turn_count=len(turns),
         job_id=session.job_id,
         handoff_run_id=session.handoff_run_id,
+        feedback=feedback if isinstance(feedback, dict) else None,
         turns=[serialize_turn(turn) for turn in turns] if include_turns else [],
     )
 
@@ -209,4 +219,15 @@ async def end_interview_session(job_id: int, session_id: str, db: Session = Depe
         status=session.status,
         handoff_status=str(handoff.get("status", "skipped")),
         handoff_run_id=handoff.get("handoff_run_id") if isinstance(handoff.get("handoff_run_id"), str) else None,
+        feedback=handoff.get("feedback") if isinstance(handoff.get("feedback"), dict) else None,
     )
+
+
+@router.delete("/jobs/{job_id}/sessions/{session_id}", response_model=InterviewChatDeleteResponse)
+def delete_interview_session(job_id: int, session_id: str, db: Session = Depends(get_db)) -> InterviewChatDeleteResponse:
+    _load_job_or_404(db, job_id)
+    session = _load_session_or_404(db, job_id, session_id)
+    db.query(InterviewChatTurn).filter(InterviewChatTurn.session_id == session.id).delete(synchronize_session=False)
+    db.delete(session)
+    db.commit()
+    return InterviewChatDeleteResponse(session_id=session_id, status="deleted")
