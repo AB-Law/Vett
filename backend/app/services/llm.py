@@ -7,7 +7,9 @@ import os
 from html import unescape
 from urllib.parse import urlparse
 from typing import Any
+from sqlalchemy.orm import Session
 from ..config import get_settings
+from .interview_docs import fetch_context_from_interview_documents
 
 logger = logging.getLogger(__name__)
 
@@ -1517,6 +1519,8 @@ async def simulate_interviewer_chat(
     language: str | None,
     conversation: list[dict[str, str]] | None = None,
     solution_text: str | None = None,
+    db: Session | None = None,
+    job_id: int | None = None,
 ) -> str:
     import litellm
 
@@ -1524,6 +1528,34 @@ async def simulate_interviewer_chat(
     safe_message = message.strip()
     if not safe_message:
         return "Please share a specific question about the problem or your approach."
+
+    document_snippets: list[str] = []
+    if db is not None:
+        try:
+            query_vector = await generate_embedding(safe_message)
+            snippets = fetch_context_from_interview_documents(
+                db=db,
+                query_vector=query_vector,
+                job_id=job_id,
+            )
+            for snippet in snippets[:3]:
+                filename = snippet.get("filename", "interview-doc")
+                owner_type = snippet.get("owner_type", "global")
+                text = snippet.get("snippet", "").strip()
+                if not text:
+                    continue
+                document_snippets.append(
+                    f"- [{owner_type}] {filename}: {text}"
+                )
+        except Exception as exc:
+            logger.debug("Interview doc retrieval failed: %s", exc)
+
+    context_appendix = ""
+    if document_snippets:
+        context_appendix = (
+            "\n\nRelevant interview document snippets:\n"
+            + "\n".join(document_snippets)
+        )
 
     prompt = INTERVIEW_CHAT_PROMPT.format(
         title=title,
@@ -1535,7 +1567,7 @@ async def simulate_interviewer_chat(
         message=safe_message,
         draft_solution=_coerce_non_empty_string(solution_text) or "No draft attached yet.",
         conversation=_history_lines(conversation or []),
-    )
+    ) + context_appendix
 
     try:
         response = await litellm.acompletion(

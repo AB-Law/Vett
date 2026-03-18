@@ -16,15 +16,18 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
 from ..models.practice import PracticeQuestion, QuestionCompany
+from ..models.interview import InterviewKnowledgeDocument
 from ..models.score import Job
 from ..config import get_settings
 from . import llm as llm_service
+from . import interview_docs
 
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20          # questions embedded per iteration
 _SLEEP_BETWEEN_BATCHES = 2.0   # seconds — keeps CPU/API load low
 _SLEEP_WHEN_IDLE = 60.0        # seconds — when all questions are embedded
+_DOC_BATCH_SIZE = 6
 
 
 def _get_priority_company_slugs(db: Session) -> list[str]:
@@ -43,6 +46,7 @@ def _fetch_batch(db: Session, priority_slugs: list[str]) -> list[PracticeQuestio
     needs_embed = and_(
         PracticeQuestion.is_active.is_(True),
         PracticeQuestion.embedding.is_(None),
+        PracticeQuestion.source_table.is_(None),
     )
     batch: list[PracticeQuestion] = []
 
@@ -72,6 +76,219 @@ def _fetch_batch(db: Session, priority_slugs: list[str]) -> list[PracticeQuestio
         batch.extend(extra)
 
     return batch
+
+
+def _fetch_document_batch(db: Session, limit: int = _DOC_BATCH_SIZE) -> list[InterviewKnowledgeDocument]:
+    return (
+        db.query(InterviewKnowledgeDocument)
+        .filter(InterviewKnowledgeDocument.status == "pending")
+        .order_by(InterviewKnowledgeDocument.id)
+        .limit(limit)
+        .all()
+    )
+
+
+def _build_document_row(
+    document: InterviewKnowledgeDocument,
+    chunk_index: int,
+    source_window: str,
+) -> PracticeQuestion:
+    scope_type = "global" if (document.owner_type or "global") == "global" else "job"
+    return PracticeQuestion(
+        title=f"{document.source_filename} - chunk {chunk_index + 1}",
+        url=document.source_ref,
+        difficulty=None,
+        acceptance=None,
+        source_commit=None,
+        scope_type=scope_type,
+        scope_job_id=document.job_id if scope_type == "job" else None,
+        source_table=interview_docs.DOC_TABLE_NAME,
+        source_id=document.id,
+        source_window=source_window,
+    )
+
+
+def _prepare_document_rows_for_embedding(
+    db: Session,
+    document: InterviewKnowledgeDocument,
+) -> list[tuple[PracticeQuestion, str]]:
+    chunks = interview_docs.chunk_interview_text(document.parsed_text)
+    if not chunks:
+        return []
+
+    scoped_rows: list[tuple[PracticeQuestion, str]] = []
+    for chunk_index, chunk_text in enumerate(chunks):
+        source_window = interview_docs.make_source_window(chunk_index)
+        existing = (
+            db.query(PracticeQuestion)
+            .filter(
+                PracticeQuestion.source_table == interview_docs.DOC_TABLE_NAME,
+                PracticeQuestion.source_id == document.id,
+                PracticeQuestion.source_window == source_window,
+            )
+            .first()
+        )
+        if existing is None:
+            existing = _build_document_row(
+                document=document,
+                chunk_index=chunk_index,
+                source_window=source_window,
+            )
+            db.add(existing)
+            db.flush()
+            scoped_rows.append((existing, chunk_text))
+            continue
+        if existing.embedding is not None:
+            continue
+        scoped_rows.append((existing, chunk_text))
+
+    return scoped_rows
+
+
+def _embedded_chunk_count(db: Session, document_id: int) -> int:
+    return (
+        db.query(PracticeQuestion)
+        .filter(
+            PracticeQuestion.source_table == interview_docs.DOC_TABLE_NAME,
+            PracticeQuestion.source_id == document_id,
+            PracticeQuestion.embedding.isnot(None),
+        )
+        .count()
+    )
+
+
+def _recover_stale_processing_documents(db: Session) -> int:
+    documents = db.query(InterviewKnowledgeDocument).filter(InterviewKnowledgeDocument.status == "processing").all()
+    if not documents:
+        return 0
+    for document in documents:
+        document.status = "pending"
+        document.error_message = None
+    db.commit()
+    return len(documents)
+
+
+async def _embed_document_rows(
+    db: Session,
+    practice_rows: list[tuple[PracticeQuestion, str]],
+    expected_model: str,
+    document: InterviewKnowledgeDocument | None = None,
+) -> tuple[int, list[str]]:
+    if not practice_rows:
+        return 0, []
+
+    tasks = [llm_service.generate_embedding(chunk_text) for _, chunk_text in practice_rows]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    failures: list[str] = []
+    embedded_count = 0
+    for (question, _), result in zip(practice_rows, results):
+        if isinstance(result, Exception):
+            failures.append(str(result))
+            continue
+        question.embedding = result
+        question.embedding_model = expected_model
+        db.add(question)
+        if document is not None:
+            document.embedded_chunks = int(document.embedded_chunks or 0) + 1
+            db.add(document)
+        embedded_count += 1
+        db.commit()
+    return embedded_count, failures
+
+
+def _mark_document_failed(document: InterviewKnowledgeDocument, errors: list[str]) -> None:
+    document.status = "failed"
+    if errors:
+        signature = interview_docs.dedupe_error_signature("; ".join(errors))
+        if signature:
+            document.error_message = f"embedding_failed:{signature}"
+        else:
+            document.error_message = "embedding_failed"
+    else:
+        document.error_message = "embedding_failed"
+
+
+def _mark_document_embedded(document: InterviewKnowledgeDocument, embedded_count: int, total_chunks: int) -> None:
+    if embedded_count and embedded_count >= total_chunks:
+        document.status = "embedded"
+        document.error_message = None
+    elif embedded_count:
+        document.status = "processing"
+        document.error_message = None
+    else:
+        _mark_document_failed(document, ["no_embedding_vectors_created"])
+
+
+async def _run_interview_document_worker(db: Session, expected_model: str) -> int:
+    documents = _fetch_document_batch(db)
+    if not documents:
+        return 0
+
+    total_processed = 0
+    for document in documents:
+        chunks = interview_docs.chunk_interview_text(document.parsed_text)
+        if not chunks:
+            _mark_document_failed(document, ["no text parsed"])
+            document.total_chunks = 0
+            document.embedded_chunks = 0
+            document.parsed_word_count = 0
+            document.chunk_coverage_ratio = 0.0
+            db.add(document)
+            db.commit()
+            continue
+
+        document.total_chunks = len(chunks)
+        integrity = interview_docs.chunk_integrity_stats(document.parsed_text)
+        document.parsed_word_count = int(integrity.get("parsed_word_count", 0) or 0)
+        document.chunk_coverage_ratio = float(integrity.get("coverage_ratio", 0.0) or 0.0)
+        document.embedded_chunks = _embedded_chunk_count(db, document.id)
+        document.status = "processing"
+        document.error_message = None
+        db.add(document)
+        db.commit()
+
+        try:
+            rows_to_embed = _prepare_document_rows_for_embedding(db, document)
+        except Exception as exc:
+            logger.exception("Failed to prepare chunks for interview doc %s", document.id)
+            _mark_document_failed(document, [str(exc)])
+            db.add(document)
+            db.commit()
+            continue
+
+        if not rows_to_embed:
+            if document.total_chunks and document.embedded_chunks >= document.total_chunks:
+                document.status = "embedded"
+                document.error_message = None
+            else:
+                document.status = "processing"
+            db.add(document)
+            db.commit()
+            continue
+
+        success_count, failures = await _embed_document_rows(
+            db,
+            rows_to_embed,
+            expected_model,
+            document=document,
+        )
+        total_processed += success_count
+        document.embedded_chunks = _embedded_chunk_count(db, document.id)
+        if failures:
+            logger.debug("Interview embedding failures for doc %s: %s", document.id, "; ".join(failures))
+            if success_count > 0:
+                document.error_message = f"partial_embed:{interview_docs.dedupe_error_signature('; '.join(failures))}"
+                document.status = "processing"
+            else:
+                _mark_document_failed(document, failures)
+        else:
+            document.status = "embedded"
+            document.error_message = None
+        db.add(document)
+        db.commit()
+
+    return total_processed
 
 
 async def _embed_batch(db: Session, questions: list[PracticeQuestion], expected_model: str) -> int:
@@ -113,12 +330,25 @@ async def run_embedding_worker() -> None:
     logger.info("Practice embedding worker started.")
     settings = get_settings()
     expected_model = settings.practice_embedding_model
+    try:
+        db = SessionLocal()
+        try:
+            recovered = _recover_stale_processing_documents(db)
+            if recovered:
+                logger.info("Recovered %d interview documents from stale processing state.", recovered)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Failed to recover stale interview documents.")
 
     while True:
         try:
             db: Session = SessionLocal()
             try:
                 priority_slugs = _get_priority_company_slugs(db)
+                document_count = await _run_interview_document_worker(db, expected_model)
+                if document_count:
+                    logger.info("Embedded %d interview document chunks.", document_count)
                 batch = _fetch_batch(db, priority_slugs)
 
                 if not batch:

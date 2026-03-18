@@ -1,9 +1,38 @@
-import { useEffect, useState } from 'react'
-import { Settings2, CheckCircle2, XCircle, Loader2, Trash2, Download, Database } from 'lucide-react'
-import { getSettings, updateSettings, testConnection, clearHistory, getEmbeddingProgress, type AppSettings } from '../lib/api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useDropzone } from 'react-dropzone'
+import { Settings2, CheckCircle2, XCircle, Loader2, Trash2, Download, Database, Upload, FileText } from 'lucide-react'
+import {
+  getSettings,
+  updateSettings,
+  testConnection,
+  clearHistory,
+  getEmbeddingProgress,
+  getInterviewDocumentProgress,
+  uploadInterviewDocument,
+  type AppSettings,
+  type InterviewKnowledgeDocument,
+  type InterviewKnowledgeDocumentProgress,
+} from '../lib/api'
 import toast from 'react-hot-toast'
 
 type Provider = 'claude' | 'openai' | 'azure_openai' | 'ollama' | 'lm_studio'
+type InterviewDocumentWithProgress = {
+  id: number
+  owner_type: 'global' | 'job'
+  job_id: number | null
+  source_filename: string
+  content_type: string
+  status: string
+  error_message: string | null
+  parser_version: string | null
+  source_ref: string | null
+  created_at: string
+  created_by_user_id: string | null
+  total_chunks: number
+  embedded_chunks: number
+  parsed_word_count: number
+  progress_percent: number
+}
 
 const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'claude', label: 'Claude' },
@@ -20,14 +49,87 @@ export default function Settings() {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [embeddingProgress, setEmbeddingProgress] = useState<{ total: number; embedded: number; percent: number } | null>(null)
+  const [interviewDocuments, setInterviewDocuments] = useState<InterviewDocumentWithProgress[]>([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [uploadingDocument, setUploadingDocument] = useState(false)
+  const documentsPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const progressPercent = useCallback((embeddedChunks: number, totalChunks: number): number => {
+    if (totalChunks <= 0) return 0
+    const value = (embeddedChunks / totalChunks) * 100
+    if (!Number.isFinite(value)) return 0
+    return Math.round(value * 10) / 10
+  }, [])
+
+  const toDocumentWithProgress = useCallback(
+    (doc: InterviewKnowledgeDocument | InterviewKnowledgeDocumentProgress): InterviewDocumentWithProgress => ({
+      id: doc.id,
+      owner_type: doc.owner_type,
+      job_id: doc.job_id,
+      source_filename: doc.source_filename,
+      content_type: 'content_type' in doc ? doc.content_type : '',
+      status: doc.status,
+      error_message: doc.error_message,
+      parser_version: 'parser_version' in doc ? doc.parser_version : null,
+      source_ref: 'source_ref' in doc ? doc.source_ref : null,
+      created_at: doc.created_at,
+      created_by_user_id: doc.created_by_user_id,
+      total_chunks: doc.total_chunks,
+      embedded_chunks: doc.embedded_chunks,
+      parsed_word_count: doc.parsed_word_count,
+      progress_percent:
+        'progress_percent' in doc ? doc.progress_percent : progressPercent(doc.embedded_chunks, doc.total_chunks),
+    }),
+    [progressPercent],
+  )
+
+  const stopDocumentPolling = (): void => {
+    if (documentsPollRef.current) {
+      clearInterval(documentsPollRef.current)
+      documentsPollRef.current = null
+    }
+  }
+
+  const isDocumentInProgress = useCallback((status: string): boolean => {
+    const normalized = status.toLowerCase()
+    return normalized.includes('pending') || normalized.includes('processing')
+  }, [])
+
+  const refreshInterviewDocuments = useCallback(async () => {
+    try {
+      const [ep, docs] = await Promise.all([getEmbeddingProgress(), getInterviewDocumentProgress()])
+      setEmbeddingProgress(ep)
+      const mappedDocs = docs.map(toDocumentWithProgress)
+      setInterviewDocuments(mappedDocs)
+
+      const shouldKeepPolling = mappedDocs.some((doc) => isDocumentInProgress(doc.status)) || ep.percent < 100
+      if (!shouldKeepPolling) {
+        stopDocumentPolling()
+      }
+    } catch {
+      // Keep existing state and try again next interval if polling is still active.
+    }
+  }, [toDocumentWithProgress])
+
+  const ensureDocumentPolling = useCallback((): void => {
+    if (documentsPollRef.current) return
+    documentsPollRef.current = setInterval(() => {
+      void refreshInterviewDocuments()
+    }, 2000)
+  }, [refreshInterviewDocuments])
 
   // Pending changes
   const [activeProvider, setActiveProvider] = useState<Provider>('ollama')
   const [fields, setFields] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    Promise.all([getSettings(), getEmbeddingProgress()])
-      .then(([s, ep]) => {
+    setLoading(true)
+    setDocumentsLoading(true)
+    const load = async () => {
+      try {
+        const [s, ep, docs] = await Promise.all([getSettings(), getEmbeddingProgress(), getInterviewDocumentProgress()])
+        const mappedDocs = docs.map(toDocumentWithProgress)
+
         setSettings(s)
         setActiveProvider(s.active_provider as Provider)
         setFields({
@@ -42,11 +144,77 @@ export default function Settings() {
           lm_studio_model: s.lm_studio_model,
         })
         setEmbeddingProgress(ep)
-      })
-      .finally(() => setLoading(false))
+        setInterviewDocuments(mappedDocs)
+        if (mappedDocs.some((doc) => isDocumentInProgress(doc.status)) || ep.percent < 100) {
+          ensureDocumentPolling()
+        }
+      } finally {
+        setLoading(false)
+        setDocumentsLoading(false)
+      }
+    }
+
+    void load()
+
+    return () => {
+      stopDocumentPolling()
+    }
   }, [])
 
   const set = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }))
+
+  const statusClass = (status: string): string => {
+    const normalized = status.toLowerCase()
+    if (normalized.includes('embed')) {
+      return 'bg-sage-100 text-sage-700 border border-sage-200'
+    }
+    if (normalized.includes('processing')) {
+      return 'bg-amber-100 text-amber-700 border border-amber-200'
+    }
+    if (normalized.includes('failed')) {
+      return 'bg-red-100 text-red-700 border border-red-200'
+    }
+    return 'bg-gray-100 text-text-muted border border-border'
+  }
+
+  const handleInterviewDocsDrop = useCallback(
+    async (files: File[]) => {
+      const file = files[0]
+      if (!file) return
+      setUploadingDocument(true)
+      try {
+        const newDoc = await uploadInterviewDocument(file)
+        const normalizedDoc = toDocumentWithProgress(newDoc)
+        setInterviewDocuments((current) => [normalizedDoc, ...current.filter((doc) => doc.id !== normalizedDoc.id)])
+        ensureDocumentPolling()
+        await refreshInterviewDocuments()
+        toast.success('Interview document uploaded')
+      } catch (err: unknown) {
+        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Upload failed'
+        toast.error(detail)
+      } finally {
+        setUploadingDocument(false)
+      }
+    },
+    [ensureDocumentPolling, refreshInterviewDocuments, toDocumentWithProgress],
+  )
+
+  const {
+    getRootProps: getInterviewDocsRootProps,
+    getInputProps: getInterviewDocsInputProps,
+    isDragActive: isInterviewDocsDragActive,
+  } = useDropzone({
+    onDrop: handleInterviewDocsDrop,
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/msword': ['.doc'],
+      'text/markdown': ['.md', '.markdown'],
+      'text/plain': ['.txt'],
+    },
+    maxFiles: 1,
+    disabled: uploadingDocument,
+  })
 
   const handleSave = async () => {
     setSaving(true)
@@ -268,10 +436,68 @@ export default function Settings() {
             />
           </div>
           {embeddingProgress.percent < 100 && (
-            <p className="text-xs text-text-muted mt-2">Embeddings are being generated in the background. Refresh to check progress.</p>
+            <p className="text-xs text-text-muted mt-2">Embedding is in progress and updates automatically.</p>
           )}
         </div>
       )}
+
+      {/* Interview Documents */}
+      <div className="card p-5 mb-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Upload className="w-4 h-4 text-text-secondary" />
+          <h2 className="section-title">Interview Documents</h2>
+        </div>
+
+        <div
+          {...getInterviewDocsRootProps()}
+          className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
+            isInterviewDocsDragActive
+              ? 'border-sage-400 bg-sage-50'
+              : 'border-border hover:border-sage-300 hover:bg-gray-50'
+          } ${uploadingDocument ? 'opacity-60 pointer-events-none' : ''}`}
+        >
+          <input {...getInterviewDocsInputProps()} />
+          <FileText className="w-7 h-7 text-text-muted mx-auto mb-2" />
+          <p className="text-sm font-medium text-text-secondary mb-1">
+            {isInterviewDocsDragActive ? 'Drop interview docs here…' : 'Drop or upload PDF / DOCX / DOC / MD / TXT'}
+          </p>
+          <p className="text-xs text-text-muted">These documents are used as interview knowledge base references.</p>
+          {uploadingDocument && <p className="text-xs text-sage-600 mt-2 font-medium">Uploading…</p>}
+        </div>
+
+        <div className="mt-4">
+          {documentsLoading ? (
+            <p className="text-xs text-text-muted">Loading interview documents…</p>
+          ) : interviewDocuments.length === 0 ? (
+            <p className="text-xs text-text-muted">No interview documents uploaded yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {interviewDocuments.map((doc) => (
+                <div key={doc.id} className="border border-border rounded p-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <div className="text-text-primary font-medium truncate">{doc.source_filename}</div>
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] ${statusClass(doc.status)}`}>
+                      {doc.status}
+                    </span>
+                  </div>
+                  {doc.error_message && <p className="text-[11px] text-red-600 mt-1">{doc.error_message}</p>}
+                  <div className="mt-2">
+                    <div className="w-full bg-gray-100 rounded-full h-2">
+                      <div
+                        className="bg-sage-500 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${Math.min(100, Math.max(0, doc.progress_percent))}%` }}
+                      />
+                    </div>
+                    <p className="text-[11px] text-text-muted mt-1">
+                      {doc.total_chunks > 0 ? `${doc.embedded_chunks} / ${doc.total_chunks} chunks` : 'No chunks yet'} ({doc.progress_percent.toFixed(1)}%)
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Data & Storage */}
       <div className="card p-5 mb-8">

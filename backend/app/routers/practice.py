@@ -699,6 +699,8 @@ async def interview_chat(payload: PracticeInterviewChatRequest, db: Session = De
         message=message,
         conversation=history,
         solution_text=payload.solution_text,
+        db=db,
+        job_id=session.job_id,
     )
 
     return PracticeInterviewChatResponse(session_id=session.session_id, question_id=question.id, interviewer_reply=reply)

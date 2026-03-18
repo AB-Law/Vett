@@ -209,6 +209,38 @@ export interface AppSettings {
   has_azure_key: boolean
 }
 
+export interface InterviewKnowledgeDocument {
+  id: number
+  owner_type: 'global' | 'job'
+  job_id: number | null
+  source_filename: string
+  content_type: string
+  status: string
+  error_message: string | null
+  parser_version: string | null
+  source_ref: string | null
+  created_at: string
+  created_by_user_id: string | null
+  total_chunks: number
+  embedded_chunks: number
+  parsed_word_count: number
+}
+
+export interface InterviewKnowledgeDocumentProgress {
+  id: number
+  owner_type: 'global' | 'job'
+  job_id: number | null
+  source_filename: string
+  status: string
+  total_chunks: number
+  embedded_chunks: number
+  progress_percent: number
+  error_message: string | null
+  parsed_word_count: number
+  created_at: string
+  created_by_user_id: string | null
+}
+
 export const getSettings = async (): Promise<AppSettings> => {
   const { data } = await api.get<AppSettings>('/settings/')
   return data
@@ -225,6 +257,39 @@ export const testConnection = async (): Promise<{ ok: boolean; reply?: string; e
 
 export const getEmbeddingProgress = async (): Promise<{ total: number; embedded: number; percent: number }> => {
   const { data } = await api.get('/settings/embedding-progress')
+  return data
+}
+
+export const getInterviewDocuments = async (): Promise<InterviewKnowledgeDocument[]> => {
+  const { data } = await api.get<InterviewKnowledgeDocument[]>('/settings/interview-documents')
+  return data
+}
+
+export const getInterviewDocumentProgress = async (): Promise<InterviewKnowledgeDocumentProgress[]> => {
+  const { data } = await api.get<InterviewKnowledgeDocumentProgress[]>('/settings/interview-documents/progress')
+  return data
+}
+
+export const uploadInterviewDocument = async (file: File): Promise<InterviewKnowledgeDocument> => {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await api.post<InterviewKnowledgeDocument>('/settings/interview-documents', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export const getJobInterviewDocuments = async (jobId: number): Promise<InterviewKnowledgeDocument[]> => {
+  const { data } = await api.get<InterviewKnowledgeDocument[]>(`/jobs/${jobId}/interview-documents`)
+  return data
+}
+
+export const uploadJobInterviewDocument = async (jobId: number, file: File): Promise<InterviewKnowledgeDocument> => {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await api.post<InterviewKnowledgeDocument>(`/jobs/${jobId}/interview-documents`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
   return data
 }
 
