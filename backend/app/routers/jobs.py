@@ -88,6 +88,7 @@ class InterviewResearchQuestion(BaseModel):
     timestamp: str
     snippet: str
     confidence_score: float = Field(ge=0.0, le=1.0)
+    citations: list[dict[str, object]] = Field(default_factory=list)
 
 
 class InterviewResearchQuestionBank(BaseModel):
@@ -140,6 +141,7 @@ class JobAnalysisResponse(BaseModel):
 _RESCORE_WORKER_LOCK = threading.Lock()
 _RESCORE_WORKER_STARTED = False
 _RESCORE_WORKER_POLL_INTERVAL_SECONDS = 0.75
+_INTERVIEW_RESEARCH_CANCEL_FLAGS: dict[str, tuple[int, asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
 
 def _log_excerpt(text: object, *, max_chars: int = 140) -> str:
@@ -177,6 +179,22 @@ def _as_int_list(value: object) -> list[int]:
 def _coerce_int(value: object, fallback: int = 0) -> int:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _coerce_optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: object, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return fallback
 
@@ -228,6 +246,19 @@ def _rescore_run_payload(run: RescoreRun) -> JobRescoreResponse:
 
 def _coerce_research_question_dict(value: object) -> dict[str, object]:
     if isinstance(value, dict):
+        raw_citations = value.get("citations", [])
+        citations = []
+        if isinstance(raw_citations, list):
+            for item in raw_citations:
+                if not isinstance(item, dict):
+                    continue
+                citations.append({
+                    "source_url": str(item.get("source_url", "")),
+                    "source_title": str(item.get("source_title", "")),
+                    "snippet": str(item.get("snippet", "")),
+                    "page_index": _coerce_optional_int(item.get("page_index")),
+                    "confidence": _coerce_float(item.get("confidence"), 0.0),
+                })
         return {
             "question": str(value.get("question", "")),
             "question_text": str(value.get("question_text", str(value.get("question", "")))),
@@ -240,7 +271,8 @@ def _coerce_research_question_dict(value: object) -> dict[str, object]:
             "reason": str(value.get("reason", "")),
             "timestamp": str(value.get("timestamp", "")),
             "snippet": str(value.get("snippet", "")),
-            "confidence_score": float(value.get("confidence_score", 0.5) or 0.5),
+            "confidence_score": _coerce_float(value.get("confidence_score"), 0.5),
+            "citations": citations,
         }
     return {
         "question": "",
@@ -255,6 +287,7 @@ def _coerce_research_question_dict(value: object) -> dict[str, object]:
         "timestamp": "",
         "snippet": "",
         "confidence_score": 0.5,
+        "citations": [],
     }
 
 
@@ -284,6 +317,12 @@ def _serialize_interview_research_session(row: InterviewResearchSession) -> Inte
     session_message = row.failure_reason or default_message
     stored_payload = row.question_bank if isinstance(row.question_bank, dict) else {}
     stored_metadata = stored_payload.get("metadata", {}) if isinstance(stored_payload, dict) else {}
+    timeline = stored_metadata.get("progress_timeline", [])
+    if not isinstance(timeline, list):
+        timeline = []
+    run_trace = stored_metadata.get("run_trace", [])
+    if not isinstance(run_trace, list):
+        run_trace = []
     return InterviewResearchSessionResponse(
         session_id=row.session_id,
         role=row.role or "",
@@ -296,6 +335,8 @@ def _serialize_interview_research_session(row: InterviewResearchSession) -> Inte
         metadata={
             "total_questions": len(question_bank.behavioral) + len(question_bank.technical) + len(question_bank.system_design) + len(question_bank.company_specific),
             "research_log": stored_metadata.get("research_log", []),
+            "progress_timeline": timeline,
+            "run_trace": run_trace,
         },
         source_urls=list(question_bank.source_urls or row.source_urls or []),
         failure_reason=row.failure_reason,
@@ -883,6 +924,10 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 emit=emit,
                 timeout_seconds=settings.interview_research_timeout_seconds,
             )
+            cancel_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            setattr(context, "cancel_event", cancel_event)
+            _INTERVIEW_RESEARCH_CANCEL_FLAGS[session_id] = (job.id, loop, cancel_event)
             result = await run_interview_research(db, context)
             result.session_id = session_id
             processing_ms = int((time.perf_counter() - start_ms) * 1000)
@@ -892,7 +937,7 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 job_id=job.id,
                 role=role,
                 company=company,
-                status="completed",
+                status="failed" if result.status == "failed" else "completed",
                 stage="finalizing",
                 question_bank=result.question_bank,
                 fallback_used=result.fallback_used,
@@ -900,23 +945,39 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 processing_ms=processing_ms,
                 metadata=result.metadata,
                 completed_at=True,
+                failure_reason=result.message if result.status == "failed" else None,
             )
             db.commit()
-            await emit({
-                "type": "done",
-                "stage": "finalizing",
-                "message": result.message,
-                "payload": {
-                    "session_id": session_id,
-                    "question_count": len(result.question_bank.all_questions()),
-                    "fallback_used": bool(result.fallback_used),
-                    "status": record.status,
-                    "metadata": result.metadata,
-                },
-            })
+            if result.status == "failed":
+                await emit({
+                    "type": "error",
+                    "stage": "finalizing",
+                    "message": result.message,
+                    "payload": {
+                        "session_id": session_id,
+                        "question_count": len(result.question_bank.all_questions()),
+                        "fallback_used": bool(result.fallback_used),
+                        "status": "failed",
+                        "metadata": result.metadata,
+                    },
+                })
+            else:
+                await emit({
+                    "type": "done",
+                    "stage": "finalizing",
+                    "message": result.message,
+                    "payload": {
+                        "session_id": session_id,
+                        "question_count": len(result.question_bank.all_questions()),
+                        "fallback_used": bool(result.fallback_used),
+                        "status": record.status,
+                        "metadata": result.metadata,
+                    },
+                })
         except Exception as exc:
             logger.exception("Interview research stream failed for job=%s", job_id)
             processing_ms = int((time.perf_counter() - start_ms) * 1000)
+            db.rollback()
             _upsert_interview_research_session(
                 db,
                 session_id=session_id,
@@ -939,7 +1000,6 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 metadata={"error": str(exc)},
                 completed_at=True,
             )
-            db.rollback()
             db.commit()
             await emit({
                 "type": "error",
@@ -948,6 +1008,7 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 "payload": {"session_id": session_id, "status": "failed"},
             })
         finally:
+            _INTERVIEW_RESEARCH_CANCEL_FLAGS.pop(session_id, None)
             await queue.put(None)
 
     async def event_generator():
@@ -967,6 +1028,20 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 await producer
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/{job_id}/interview-research/session/{session_id}/cancel")
+async def cancel_interview_research(job_id: int, session_id: str):
+    cancel_tuple = _INTERVIEW_RESEARCH_CANCEL_FLAGS.get(session_id)
+    if cancel_tuple is None:
+        return {"status": "not_found", "job_id": job_id, "session_id": session_id}
+
+    mapped_job_id, loop, cancel_flag = cancel_tuple
+    if mapped_job_id != job_id:
+        return {"status": "not_found", "job_id": job_id, "session_id": session_id}
+
+    loop.call_soon_threadsafe(cancel_flag.set)
+    return {"status": "cancel_requested", "job_id": job_id, "session_id": session_id}
 
 
 @router.get("/stream")

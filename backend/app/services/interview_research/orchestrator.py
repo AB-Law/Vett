@@ -1019,13 +1019,21 @@ async def _critic_recovery_candidates(
     recovered: list[dict[str, Any]] = []
     recovery_log: list[dict[str, Any]] = []
     dropped_domains_count = 0
+
+    total_budget = max(1.0, float(timeout_seconds))
+    query_count = max(1, len(queries))
+    reserved_vector_budget = min(3.0, total_budget * 0.25) if job is not None else 0.0
+    search_budget = max(1.0, total_budget - reserved_vector_budget)
+    # Keep each query bounded so one slow network read does not consume the whole node budget.
+    per_query_timeout = max(1.0, min(4.0, search_budget / query_count))
+    vector_timeout = max(1.0, min(4.0, reserved_vector_budget or (total_budget * 0.25)))
     for query in queries:
         query_start = time.perf_counter()
         local_metrics = {"search_web_dropped_domains_count": 0}
         try:
             rows = await asyncio.wait_for(
                 search_web(query, max_items=4, metrics=local_metrics),
-                timeout=timeout_seconds,
+                timeout=per_query_timeout,
             )
             status = "ok"
         except Exception as exc:
@@ -1055,7 +1063,7 @@ async def _critic_recovery_candidates(
         try:
             rows = await asyncio.wait_for(
                 query_vector_store(db, vector_query, job_id=job.id, max_items=3, fetch_limit=2),
-                timeout=timeout_seconds,
+                timeout=vector_timeout,
             )
             for row in rows:
                 row["reason"] = _clean(row.get("reason")) or f"Critic recovery vector query: {rationale}"

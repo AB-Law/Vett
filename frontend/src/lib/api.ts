@@ -336,6 +336,16 @@ export const getInterviewResearchSession = async (
   return data
 }
 
+export const cancelInterviewResearchSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<{ status: string; job_id: number; session_id: string }> => {
+  const { data } = await api.post<{ status: string; job_id: number; session_id: string }>(
+    `/jobs/${jobId}/interview-research/session/${sessionId}/cancel`,
+  )
+  return data
+}
+
 export const buildInterviewResearchStreamUrl = (jobId: number): string =>
   `/api/jobs/${jobId}/interview-research/stream`
 
@@ -389,6 +399,15 @@ export interface InterviewResearchQuestion {
   timestamp: string
   snippet: string
   confidence_score: number
+  citations?: InterviewResearchCitation[]
+}
+
+export interface InterviewResearchCitation {
+  source_url: string
+  source_title: string
+  snippet: string
+  page_index?: number | null
+  confidence: number
 }
 
 export interface InterviewResearchQuestionBank {
@@ -417,6 +436,19 @@ export interface InterviewResearchSession {
   updated_at: string
   started_at: string | null
   completed_at: string | null
+}
+
+export type InterviewResearchProgressItem = {
+  stage: string
+  tool: string
+  query: string
+  status: string
+  latency_ms: number
+  result_count: number
+  rejected_count: number
+  error: string
+  metadata: Record<string, unknown>
+  timestamp: string
 }
 
 export interface JobSearchResponse {

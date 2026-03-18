@@ -1,5 +1,6 @@
 from .models import InterviewResearchQuestion, InterviewResearchQuestionBank, InterviewResearchResult, StageEvent
-from .orchestrator import InterviewResearchRunContext, run_interview_research
+from .orchestrator import InterviewResearchRunContext
+from .agent_graph import run_interview_research
 from .tools import (
     build_company_culture_query,
     build_distributed_systems_followup_query,

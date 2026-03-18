@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from pathlib import Path
 
@@ -12,12 +13,14 @@ from app.database import Base
 from app.config import get_settings
 from app.services.interview_research.models import InterviewResearchQuestion, InterviewResearchQuestionBank
 from app.services.interview_research.orchestrator import (
+    InterviewResearchRunContext,
     _apply_minimums,
     _extract_candidate_profile_context,
     _fallback_questions_for_category,
     _deterministic_critic_decision,
     _parse_or_plan,
 )
+from app.services.interview_research.agent_graph import InterviewResearchAgentRunner
 from app.services.interview_research.searxng_client import SearXNGClient
 from app.services.interview_research.tools import search_web
 from app.models.user_profile import UserProfile
@@ -198,3 +201,27 @@ def test_company_specific_fallback_questions_are_answerable_without_inside_acces
     assert "public information" in combined
     assert "unknowns" in combined
     assert "evaluate engineering culture and execution differences" not in combined
+
+
+@pytest.mark.asyncio
+async def test_emit_status_best_effort_swallows_timeout(monkeypatch):
+    db = _new_db_session()
+    runner = InterviewResearchAgentRunner(
+        db,
+        InterviewResearchRunContext(
+            role="Backend Engineer",
+            company="Acme",
+            job=None,
+            emit=None,
+            timeout_seconds=5,
+        ),
+    )
+
+    async def always_timeout(*_args, **_kwargs):
+        await asyncio.sleep(0)
+        raise asyncio.TimeoutError("deadline reached")
+
+    monkeypatch.setattr(runner, "_emit_status", always_timeout)
+
+    # Should never raise even when status emit path times out.
+    await runner._emit_status_best_effort(stage="failed", message="timeout")

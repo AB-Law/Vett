@@ -18,7 +18,9 @@ import {
   getJobInterviewDocuments,
   uploadJobInterviewDocument,
   type InterviewKnowledgeDocument,
+  type InterviewResearchProgressItem,
   buildInterviewResearchStreamUrl,
+  cancelInterviewResearchSession,
   getInterviewResearchSession,
   type InterviewResearchSession,
 } from '../lib/api'
@@ -135,6 +137,14 @@ export default function JobDetails() {
   const [prepResearchSession, setPrepResearchSession] = useState<InterviewResearchSession | null>(null)
   const [prepInterviewLoading, setPrepInterviewLoading] = useState(false)
   const [prepInterviewError, setPrepInterviewError] = useState('')
+  const [prepProgressTimeline, setPrepProgressTimeline] = useState<InterviewResearchProgressItem[]>([])
+  const [prepActiveSessionId, setPrepActiveSessionId] = useState<string>('')
+  const [prepLiveQuestionSnapshot, setPrepLiveQuestionSnapshot] = useState<{
+    behavioral: number
+    technical: number
+    system_design: number
+    company_specific: number
+  } | null>(null)
   const prepResearchEventSourceRef = useRef<EventSource | null>(null)
   const isStoppingPrepInterviewStreamRef = useRef(false)
 
@@ -263,10 +273,34 @@ export default function JobDetails() {
     try {
       const session = await getInterviewResearchSession(job.id, sessionId)
       setPrepResearchSession(session)
+      const metadata = session.metadata as Record<string, unknown>
+      const timeline = metadata?.progress_timeline
+      if (Array.isArray(timeline)) {
+        setPrepProgressTimeline(timeline as InterviewResearchProgressItem[])
+      }
       setPrepInterviewError('')
       await refreshQuestions()
     } catch (error: unknown) {
       setPrepInterviewError(error instanceof Error ? error.message : 'Could not load interview research results')
+    }
+  }
+
+  const handleCancelPrepInterview = async (): Promise<void> => {
+    if (!job?.id || !prepActiveSessionId) return
+    try {
+      const response = await cancelInterviewResearchSession(job.id, prepActiveSessionId)
+      if (response.status !== 'cancel_requested') {
+        throw new Error(
+          response.status === 'not_found'
+            ? 'Interview prep run is no longer active.'
+            : `Unexpected cancel response: ${response.status}`,
+        )
+      }
+      setPrepInterviewError('Cancellation requested. Waiting for server acknowledgement…')
+      stopInterviewResearchStream()
+      setPrepInterviewLoading(false)
+    } catch (error: unknown) {
+      setPrepInterviewError(error instanceof Error ? error.message : 'Could not cancel interview prep run')
     }
   }
 
@@ -278,6 +312,9 @@ export default function JobDetails() {
     setPrepInterviewError('')
     setPrepEventLog([])
     setPrepResearchSession(null)
+    setPrepProgressTimeline([])
+    setPrepActiveSessionId('')
+    setPrepLiveQuestionSnapshot(null)
 
     const eventSource = new EventSource(buildInterviewResearchStreamUrl(job.id))
     prepResearchEventSourceRef.current = eventSource
@@ -288,12 +325,50 @@ export default function JobDetails() {
           type?: string
           stage?: string
           message?: string
-          payload?: { session_id?: string }
+          status?: string
+          tool?: string
+          query?: string
+          latency_ms?: number
+          result_count?: number
+          rejected_count?: number
+          error?: string
+          timestamp?: string
+          payload?: { session_id?: string; metadata?: Record<string, unknown> }
         }
         const message = payload.message || `${payload.type || 'status'}${payload.stage ? ` (${payload.stage})` : ''}`
         const nextSessionId = payload.payload?.session_id || (payload as { session_id?: string }).session_id
+        if (nextSessionId) {
+          setPrepActiveSessionId(nextSessionId)
+        }
+        if (payload.type === 'status') {
+          const statusEvent: InterviewResearchProgressItem = {
+            stage: payload.stage || '',
+            tool: payload.tool || '',
+            query: payload.query || '',
+            status: payload.status || 'ok',
+            latency_ms: payload.latency_ms || 0,
+            result_count: payload.result_count || 0,
+            rejected_count: payload.rejected_count || 0,
+            error: payload.error || '',
+            metadata: {},
+            timestamp: payload.timestamp || new Date().toISOString(),
+          }
+          setPrepProgressTimeline((current) => [...current, statusEvent].slice(-60))
+        }
         setPrepEventLog((current) => [...current, message].slice(-20))
         if (payload.type === 'done' && nextSessionId) {
+          const doneMetadata = payload.payload?.metadata as Record<string, unknown> | undefined
+          const snapshot = doneMetadata?.question_bank_snapshot as
+            | { behavioral?: number; technical?: number; system_design?: number; company_specific?: number }
+            | undefined
+          if (snapshot) {
+            setPrepLiveQuestionSnapshot({
+              behavioral: snapshot.behavioral || 0,
+              technical: snapshot.technical || 0,
+              system_design: snapshot.system_design || 0,
+              company_specific: snapshot.company_specific || 0,
+            })
+          }
           void fetchResearchSession(nextSessionId)
           setPrepInterviewLoading(false)
           stopInterviewResearchStream()
@@ -708,6 +783,15 @@ export default function JobDetails() {
               {prepInterviewLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
               {prepInterviewLoading ? 'Preparing interview questions…' : 'Prep Interview'}
             </button>
+            {prepInterviewLoading ? (
+              <button
+                type="button"
+                onClick={() => void handleCancelPrepInterview()}
+                className="rounded border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 px-3 py-1.5 text-xs"
+              >
+                Cancel run
+              </button>
+            ) : null}
             {prepResearchSession?.status ? <span className="text-[11px] text-text-muted">Last status: {prepResearchSession.status}</span> : null}
           </div>
 
@@ -720,6 +804,24 @@ export default function JobDetails() {
                   {eventLine}
                 </p>
               ))}
+            </div>
+          ) : null}
+
+          {prepProgressTimeline.length > 0 ? (
+            <div className="mb-2 border border-border rounded p-2">
+              <div className="text-[11px] font-semibold text-text-primary mb-1">Structured timeline</div>
+              <div className="space-y-1 max-h-44 overflow-auto">
+                {prepProgressTimeline.slice(-12).map((item, idx) => (
+                  <div key={`${item.stage}-${idx}-${item.timestamp}`} className="text-[11px] text-text-secondary flex items-start justify-between gap-2">
+                    <span>
+                      <span className="font-medium text-text-primary">{item.stage || 'status'}</span>
+                      {item.tool ? ` · ${item.tool}` : ''}
+                      {item.status ? ` · ${item.status}` : ''}
+                    </span>
+                    <span className="text-text-muted">{item.result_count > 0 ? `${item.result_count} hits` : ''}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : null}
         </div>
@@ -850,16 +952,16 @@ export default function JobDetails() {
             </p>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mb-2">
               <div className="p-2 border border-border rounded text-[11px]">
-                Behavioral: {prepResearchSession.question_bank.behavioral.length}
+                Behavioral: {prepLiveQuestionSnapshot?.behavioral ?? prepResearchSession.question_bank.behavioral.length}
               </div>
               <div className="p-2 border border-border rounded text-[11px]">
-                Technical: {prepResearchSession.question_bank.technical.length}
+                Technical: {prepLiveQuestionSnapshot?.technical ?? prepResearchSession.question_bank.technical.length}
               </div>
               <div className="p-2 border border-border rounded text-[11px]">
-                System design: {prepResearchSession.question_bank.system_design.length}
+                System design: {prepLiveQuestionSnapshot?.system_design ?? prepResearchSession.question_bank.system_design.length}
               </div>
               <div className="p-2 border border-border rounded text-[11px]">
-                Company specific: {prepResearchSession.question_bank.company_specific.length}
+                Company specific: {prepLiveQuestionSnapshot?.company_specific ?? prepResearchSession.question_bank.company_specific.length}
               </div>
             </div>
             <div className="space-y-3 mb-3">
@@ -885,6 +987,18 @@ export default function JobDetails() {
                               {[item.reason, item.source_title].filter(Boolean).join(' · ')}
                             </div>
                           )}
+                          {item.citations?.length ? (
+                            <div className="mt-1 space-y-1">
+                              {item.citations.slice(0, 2).map((citation, cidx) => (
+                                <div key={`${citation.source_url}-${cidx}`} className="text-[10px] text-text-muted border border-border rounded px-1.5 py-1">
+                                  <div className="font-medium text-text-secondary">
+                                    {citation.source_title || citation.source_url || 'Source'}
+                                  </div>
+                                  {citation.snippet ? <div className="italic">"{citation.snippet}"</div> : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
                         </li>
                       ))}
                     </ul>

@@ -13,6 +13,16 @@ def _utc_timestamp() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+class InterviewResearchCitation(BaseModel):
+    source_url: str = ""
+    source_title: str = ""
+    snippet: str = ""
+    page_index: int | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    model_config = {"extra": "ignore"}
+
+
 class InterviewResearchQuestion(BaseModel):
     question: str
     tool: str
@@ -27,6 +37,7 @@ class InterviewResearchQuestion(BaseModel):
     timestamp: str = Field(default_factory=_utc_timestamp)
     snippet: str
     confidence_score: float = Field(ge=0.0, le=1.0)
+    citations: list[InterviewResearchCitation] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sync_question_aliases(self) -> "InterviewResearchQuestion":
