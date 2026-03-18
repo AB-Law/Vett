@@ -343,10 +343,14 @@ export interface Job {
 
 export interface InterviewResearchQuestion {
   question: string
+  question_text?: string
   tool: string
   query: string
   source_url: string
   source_title: string
+  source_type?: string
+  query_used?: string
+  reason?: string
   timestamp: string
   snippet: string
   confidence_score: number

@@ -79,8 +79,12 @@ class InterviewResearchQuestion(BaseModel):
     question: str
     tool: str
     query: str
+    question_text: str = ""
     source_url: str
     source_title: str
+    source_type: str = "search"
+    query_used: str = ""
+    reason: str = ""
     timestamp: str
     snippet: str
     confidence_score: float = Field(ge=0.0, le=1.0)
@@ -226,20 +230,28 @@ def _coerce_research_question_dict(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return {
             "question": str(value.get("question", "")),
+            "question_text": str(value.get("question_text", str(value.get("question", "")))),
             "tool": str(value.get("tool", "")),
             "query": str(value.get("query", "")),
             "source_url": str(value.get("source_url", "")),
             "source_title": str(value.get("source_title", "")),
+            "source_type": str(value.get("source_type", "search")),
+            "query_used": str(value.get("query_used", value.get("query", ""))),
+            "reason": str(value.get("reason", "")),
             "timestamp": str(value.get("timestamp", "")),
             "snippet": str(value.get("snippet", "")),
             "confidence_score": float(value.get("confidence_score", 0.5) or 0.5),
         }
     return {
         "question": "",
+        "question_text": "",
         "tool": "",
         "query": "",
         "source_url": "",
         "source_title": "",
+        "source_type": "search",
+        "query_used": "",
+        "reason": "",
         "timestamp": "",
         "snippet": "",
         "confidence_score": 0.5,
@@ -270,6 +282,8 @@ def _serialize_interview_research_session(row: InterviewResearchSession) -> Inte
     question_bank = _coerce_research_question_bank(row.question_bank or {})
     default_message = "Interview research failed." if row.status == "failed" else "Interview research completed."
     session_message = row.failure_reason or default_message
+    stored_payload = row.question_bank if isinstance(row.question_bank, dict) else {}
+    stored_metadata = stored_payload.get("metadata", {}) if isinstance(stored_payload, dict) else {}
     return InterviewResearchSessionResponse(
         session_id=row.session_id,
         role=row.role or "",
@@ -281,6 +295,7 @@ def _serialize_interview_research_session(row: InterviewResearchSession) -> Inte
         question_bank=question_bank,
         metadata={
             "total_questions": len(question_bank.behavioral) + len(question_bank.technical) + len(question_bank.system_design) + len(question_bank.company_specific),
+            "research_log": stored_metadata.get("research_log", []),
         },
         source_urls=list(question_bank.source_urls or row.source_urls or []),
         failure_reason=row.failure_reason,
@@ -308,12 +323,17 @@ def _upsert_interview_research_session(
     processing_ms: int,
     failure_reason: str | None = None,
     completed_at: bool = False,
+    metadata: dict[str, object] | None = None,
 ) -> InterviewResearchSession:
     row = (
         db.query(InterviewResearchSession)
         .filter(InterviewResearchSession.session_id == session_id)
         .first()
     )
+    payload = question_bank.model_dump()
+    if metadata:
+        payload["metadata"] = dict(metadata)
+
     if row is None:
         row = InterviewResearchSession(
             session_id=session_id,
@@ -322,7 +342,7 @@ def _upsert_interview_research_session(
             company=company,
             status=status,
             stage=stage,
-            question_bank=question_bank.model_dump(),
+            question_bank=payload,
             source_urls=question_bank.source_urls,
             fallback_used=bool(fallback_used),
             failure_reason=failure_reason or message,
@@ -340,7 +360,7 @@ def _upsert_interview_research_session(
     row.stage = stage
     row.role = role
     row.company = company
-    row.question_bank = question_bank.model_dump()
+    row.question_bank = payload
     row.source_urls = question_bank.source_urls
     row.fallback_used = bool(fallback_used)
     row.failure_reason = failure_reason or message
@@ -878,6 +898,7 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 fallback_used=result.fallback_used,
                 message=result.message,
                 processing_ms=processing_ms,
+                metadata=result.metadata,
                 completed_at=True,
             )
             db.commit()
@@ -890,6 +911,7 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                     "question_count": len(result.question_bank.all_questions()),
                     "fallback_used": bool(result.fallback_used),
                     "status": record.status,
+                    "metadata": result.metadata,
                 },
             })
         except Exception as exc:
@@ -914,6 +936,7 @@ async def stream_interview_research(job_id: int, db: Session = Depends(get_db)):
                 message="Interview research failed.",
                 processing_ms=processing_ms,
                 failure_reason=str(exc),
+                metadata={"error": str(exc)},
                 completed_at=True,
             )
             db.rollback()

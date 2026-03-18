@@ -61,7 +61,10 @@ services:
     depends_on:
       - backend
     environment:
-      - BASE_URL=http://searxng:8080
+      - SEARXNG_BASE_URL=http://searxng:8080
+      - SEARXNG_SECRET=changeme-dev-secret
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml
     restart: unless-stopped
 
   redis:

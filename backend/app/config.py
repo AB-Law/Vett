@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     searxng_timeout_seconds: int = 8
     searxng_client_ip: str = "127.0.0.1"
     interview_research_timeout_seconds: int = 20
+    interview_research_tool_timeout_seconds: int = 12
+    interview_research_blocked_domains: str = (
+        "linkedin.com/jobs,jobinja.ir,careerbuilder.com,indeed.com,monster.com,"
+        "fiverr.com,upwork.com,ziprecruiter.com,glassdoor.com/jobs,angel.co/jobs,"
+        "zohorecruit.com,zohorecruit.in,vk.com,geeksforgeeks.org,github.com/indy256"
+    )
+    interview_research_allowed_domains: str = ""
 
     # Phase 2
     celery_broker_url: str = "redis://redis:6379/0"

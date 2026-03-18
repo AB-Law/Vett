@@ -51,7 +51,12 @@ class SearXNGClient:
             "X-Forwarded-Proto": "http",
         }
 
-    async def search(self, query: str, max_results: int = 5) -> list[SearXNGResult]:
+    async def search(
+        self,
+        query: str,
+        max_results: int = 5,
+        engines: str = "bing",
+    ) -> list[SearXNGResult]:
         if not query:
             return []
         params = {
@@ -59,6 +64,7 @@ class SearXNGClient:
             "format": "json",
             "categories": "general",
             "language": "en-US",
+            "engines": engines,
         }
         if max_results and max_results > 0:
             params["pageno"] = 1

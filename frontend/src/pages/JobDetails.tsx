@@ -862,6 +862,36 @@ export default function JobDetails() {
                 Company specific: {prepResearchSession.question_bank.company_specific.length}
               </div>
             </div>
+            <div className="space-y-3 mb-3">
+              {[
+                { label: 'Behavioral', items: prepResearchSession.question_bank.behavioral },
+                { label: 'Technical', items: prepResearchSession.question_bank.technical },
+                { label: 'System design', items: prepResearchSession.question_bank.system_design },
+                { label: 'Company specific', items: prepResearchSession.question_bank.company_specific },
+              ].map(({ label, items }) => {
+                const questions = items
+                if (!questions.length) return null
+                return (
+                  <div key={label}>
+                    <div className="text-[11px] font-semibold text-text-primary mb-1">{label}</div>
+                    <ul className="space-y-1.5">
+                      {questions.map((item, index) => (
+                        <li key={`${label}-${index}-${item.source_url}`} className="text-[11px] text-text-secondary">
+                          <div className="text-text-primary">
+                            {item.question_text || item.question}
+                          </div>
+                          {(item.reason || item.source_title) && (
+                            <div className="text-[10px] text-text-muted">
+                              {[item.reason, item.source_title].filter(Boolean).join(' · ')}
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )
+              })}
+            </div>
             {prepResearchSession.question_bank.source_urls.length > 0 && (
               <div className="text-xs">
                 <div className="font-semibold text-text-primary mb-1">Provenance</div>

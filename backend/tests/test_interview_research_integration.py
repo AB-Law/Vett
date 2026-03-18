@@ -151,7 +151,11 @@ async def test_stream_interview_research_persists_session_and_returns_fetchable_
             question_bank=bank,
             fallback_used=False,
             message="Research pipeline completed.",
-            metadata={"total_questions": len(bank.all_questions())},
+            metadata={
+                "total_questions": len(bank.all_questions()),
+                "research_log": [],
+                "tools_used": ["query_vector_store"],
+            },
         )
 
     monkeypatch.setattr(jobs_router, "run_interview_research", fake_run_interview_research)
@@ -165,6 +169,8 @@ async def test_stream_interview_research_persists_session_and_returns_fetchable_
     done_event = next((event for event in event_payloads if event.get("type") == "done"), None)
     done_payload = done_event.get("payload", {}) if done_event else None
     assert done_payload is not None
+    assert isinstance(done_payload.get("metadata", {}).get("research_log"), list)
+    assert "tools_used" in done_payload.get("metadata", {})
     assert "search_interview_questions" in stages
     assert "search_role_skills" in stages
     assert "search_company_engineering_culture" in stages
