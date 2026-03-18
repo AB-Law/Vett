@@ -1,6 +1,9 @@
 import json
+from io import BytesIO
 
 import pytest
+from fastapi import UploadFile
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -367,3 +370,47 @@ def test_delete_interview_session_removes_transcript_rows():
     remaining_turns = db.query(InterviewChatTurn).all()
     assert remaining_session is None
     assert remaining_turns == []
+
+
+@pytest.mark.asyncio
+async def test_transcribe_interview_audio_success(monkeypatch):
+    db = _new_db_session()
+    job = Job(title="Backend Engineer", company="Acme", description="Build APIs.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+
+    def _fake_transcribe(**_kwargs):
+        return "I improved API latency by 30 percent.", 210
+
+    monkeypatch.setattr(interview_chat_router, "transcribe_audio_bytes", _fake_transcribe)
+
+    audio_file = UploadFile(filename="input.webm", file=BytesIO(b"dummy-audio"))
+    result = await interview_chat_router.transcribe_interview_audio(job.id, session.session_id, audio_file=audio_file, db=db)
+
+    assert result.transcript == "I improved API latency by 30 percent."
+    assert result.latency_ms == 210
+
+
+@pytest.mark.asyncio
+async def test_transcribe_interview_audio_no_speech_maps_to_422(monkeypatch):
+    db = _new_db_session()
+    job = Job(title="Backend Engineer", company="Acme", description="Build APIs.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+
+    def _fake_transcribe(**_kwargs):
+        raise interview_chat_router.SttNoSpeechError("No speech detected in recording")
+
+    monkeypatch.setattr(interview_chat_router, "transcribe_audio_bytes", _fake_transcribe)
+
+    audio_file = UploadFile(filename="input.webm", file=BytesIO(b"dummy-audio"))
+    with pytest.raises(HTTPException) as exc_info:
+        await interview_chat_router.transcribe_interview_audio(job.id, session.session_id, audio_file=audio_file, db=db)
+    assert exc_info.value.status_code == 422
+    assert "No speech detected" in str(exc_info.value.detail)

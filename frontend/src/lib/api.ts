@@ -542,6 +542,29 @@ export const deleteInterviewChatSession = async (
   return data
 }
 
+export const transcribeInterviewAudio = async (
+  jobId: number,
+  sessionId: string,
+  audioBlob: Blob,
+): Promise<{ transcript: string; latency_ms: number }> => {
+  const form = new FormData()
+  form.append('audio_file', audioBlob, 'interview-input.webm')
+  try {
+    const { data } = await api.post<{ transcript: string; latency_ms: number }>(
+      `/interview-chat/jobs/${jobId}/sessions/${sessionId}/transcribe`,
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000 },
+    )
+    return data
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      const detail = (error.response?.data as { detail?: string } | undefined)?.detail
+      throw new Error(detail || `Transcription failed (${error.response?.status ?? 'network'})`)
+    }
+    throw error
+  }
+}
+
 // ── Jobs (Phase 2) ────────────────────────────────────────────────────────────
 
 export interface Job {

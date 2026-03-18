@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Loader2, Play, Square, MessageCircle, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowLeft, Loader2, Play, Square, MessageCircle, Sparkles, Trash2, Mic, MicOff } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import {
@@ -11,11 +11,14 @@ import {
   getJob,
   listInterviewChatSessions,
   streamInterviewChatTurn,
+  transcribeInterviewAudio,
   type InterviewChatFeedback,
   type InterviewChatSession,
   type InterviewChatSessionDetail,
   type Job,
 } from '../lib/api'
+
+type SttState = 'idle' | 'recording' | 'transcribing' | 'error'
 
 export default function InterviewPrep() {
   const { id } = useParams<{ id: string }>()
@@ -27,8 +30,20 @@ export default function InterviewPrep() {
   const [draft, setDraft] = useState('')
   const [streamingText, setStreamingText] = useState('')
   const [latestFeedback, setLatestFeedback] = useState<InterviewChatFeedback | null>(null)
+  const [sttState, setSttState] = useState<SttState>('idle')
+  const [sttError, setSttError] = useState<string | null>(null)
+  const [isRecorderSupported] = useState<boolean>(
+    globalThis.window !== undefined &&
+      typeof navigator !== 'undefined' &&
+      typeof navigator.mediaDevices?.getUserMedia === 'function' &&
+      typeof MediaRecorder !== 'undefined',
+  )
   const transcriptRef = useRef<HTMLDivElement | null>(null)
   const autoStartedRef = useRef(false)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const audioChunksRef = useRef<BlobPart[]>([])
+  const sttStartedAtRef = useRef<number | null>(null)
 
   const numericId = useMemo(() => Number(id || 0), [id])
 
@@ -93,6 +108,22 @@ export default function InterviewPrep() {
     }
   }
 
+  const logSttEvent = (event: string, extra: Record<string, unknown> = {}): void => {
+    // Lightweight client telemetry for local debugging and latency tracking.
+    // eslint-disable-next-line no-console
+    console.info('[Interview STT]', event, { ts: new Date().toISOString(), ...extra })
+  }
+
+  const describeUnknownError = (error: unknown): string => {
+    if (error instanceof Error) return error.message
+    if (typeof error === 'string') return error
+    try {
+      return JSON.stringify(error)
+    } catch {
+      return 'Unknown error'
+    }
+  }
+
   const activeTurnCount = activeSession?.turns.length ?? 0
   const isPreparing =
     activeSession?.status === 'active' &&
@@ -148,12 +179,146 @@ export default function InterviewPrep() {
     void startOrResume()
   }, [loading, sending, job, activeSession])
 
-  const sendMessage = async (): Promise<void> => {
-    if (!draft.trim()) return
-    const value = draft.trim()
+  const sendMessageText = async (text: string): Promise<void> => {
+    if (!text.trim()) return
+    const value = text.trim()
     setDraft('')
     await streamTurn(value)
   }
+
+  const sendMessage = async (): Promise<void> => {
+    await sendMessageText(draft)
+  }
+
+  const releaseRecorder = (): void => {
+    mediaRecorderRef.current = null
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop())
+    }
+    mediaStreamRef.current = null
+    audioChunksRef.current = []
+  }
+
+  const stopRecordingAndTranscribe = async (): Promise<void> => {
+    const recorder = mediaRecorderRef.current
+    if (recorder?.state !== 'recording') return
+
+    setSttError(null)
+    setSttState('transcribing')
+    logSttEvent('stop')
+
+    const stoppedBlob = await new Promise<Blob>((resolve) => {
+      recorder.addEventListener(
+        'stop',
+        () => {
+          const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+          resolve(blob)
+        },
+        { once: true },
+      )
+      recorder.stop()
+    })
+
+    releaseRecorder()
+
+    if (!stoppedBlob.size) {
+      setSttState('error')
+      setSttError('No audio detected. Please try again or type your answer.')
+      toast.error('No speech detected. You can type your answer instead.')
+      logSttEvent('no_audio_blob')
+      return
+    }
+    if (!navigator.onLine) {
+      setSttState('error')
+      setSttError('You appear offline. Please type your answer.')
+      toast.error('Offline: speech could not be transcribed. Fallback to text input.')
+      logSttEvent('offline_before_transcribe')
+      return
+    }
+    if (!activeSession) {
+      setSttState('error')
+      return
+    }
+
+    try {
+      const result = await transcribeInterviewAudio(numericId, activeSession.session_id, stoppedBlob)
+      const transcript = result.transcript.trim()
+      if (!transcript) {
+        setSttState('error')
+        setSttError('No speech recognized. Please try again or type your answer.')
+        toast.error('No speech recognized. Fallback to typing.')
+        logSttEvent('no_speech', { latency_ms: result.latency_ms })
+        return
+      }
+      setDraft(transcript)
+      logSttEvent('transcribe_success', {
+        latency_ms: result.latency_ms,
+        transcript_chars: transcript.length,
+        capture_ms: sttStartedAtRef.current ? Date.now() - sttStartedAtRef.current : null,
+      })
+      await sendMessageText(transcript)
+      setSttState('idle')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Transcription failed'
+      setSttState('error')
+      setSttError(message)
+      toast.error(`${message}. You can still type your answer.`)
+      logSttEvent('transcribe_error', { error: message })
+    } finally {
+      sttStartedAtRef.current = null
+    }
+  }
+
+  const toggleRecording = async (): Promise<void> => {
+    if (!isRecorderSupported) {
+      setSttState('error')
+      setSttError('This browser does not support microphone recording.')
+      toast.error('Mic input is not supported in this browser')
+      return
+    }
+    if (activeSession?.status !== 'active' || sending) return
+    if (sttState === 'transcribing') return
+
+    if (sttState === 'recording') {
+      await stopRecordingAndTranscribe()
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream)
+      mediaStreamRef.current = stream
+      mediaRecorderRef.current = recorder
+      audioChunksRef.current = []
+      sttStartedAtRef.current = Date.now()
+      recorder.addEventListener('dataavailable', (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
+      })
+      recorder.start()
+      setSttError(null)
+      setSttState('recording')
+      logSttEvent('start', { mime_type: recorder.mimeType })
+    } catch (error: unknown) {
+      const denied = error instanceof DOMException && error.name === 'NotAllowedError'
+      const message = denied ? 'Microphone permission denied. Please allow mic access.' : 'Could not start microphone recording.'
+      setSttState('error')
+      setSttError(message)
+      toast.error(`${message} You can type your answer instead.`)
+      logSttEvent('start_error', { error: describeUnknownError(error) })
+      releaseRecorder()
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (mediaRecorderRef.current?.state === 'recording') {
+        mediaRecorderRef.current.stop()
+      }
+      releaseRecorder()
+    }
+  }, [])
 
   const endInterview = async (): Promise<void> => {
     if (!activeSession || sending) return
@@ -195,6 +360,24 @@ export default function InterviewPrep() {
         <div className="flex items-center justify-center py-16 text-sm text-text-muted">Loading interview prep…</div>
       </div>
     )
+  }
+
+  let micButtonLabel = 'Mic'
+  if (sttState === 'recording') {
+    micButtonLabel = 'Stop'
+  } else if (sttState === 'transcribing') {
+    micButtonLabel = 'Transcribing'
+  }
+  const micButtonTitle = sttState === 'recording' ? 'Stop recording' : 'Start voice input'
+  let sttStatusText = 'Voice input: unavailable in this browser. Use text input.'
+  if (sttState === 'recording') {
+    sttStatusText = 'Voice input: recording... tap Stop to transcribe.'
+  } else if (sttState === 'transcribing') {
+    sttStatusText = 'Voice input: transcribing audio...'
+  } else if (sttState === 'error' && sttError) {
+    sttStatusText = `Voice input error: ${sttError}`
+  } else if (isRecorderSupported) {
+    sttStatusText = 'Voice input: ready (fallback to text is always available).'
   }
 
   return (
@@ -412,6 +595,21 @@ export default function InterviewPrep() {
                   />
                   <button
                     type="button"
+                    onClick={() => void toggleRecording()}
+                    disabled={activeSession.status !== 'active' || sending || sttState === 'transcribing'}
+                    className={`h-10 py-1.5 px-3 text-xs rounded-lg border disabled:opacity-60 ${
+                      sttState === 'recording'
+                        ? 'border-red-300 bg-red-50 text-red-700 hover:bg-red-100'
+                        : 'border-border bg-surface-secondary text-text-primary hover:bg-surface'
+                    }`}
+                    title={micButtonTitle}
+                    aria-label={micButtonTitle}
+                  >
+                    {sttState === 'recording' ? <MicOff className="inline w-3 h-3 mr-1" /> : <Mic className="inline w-3 h-3 mr-1" />}
+                    {micButtonLabel}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void sendMessage()}
                     disabled={!draft.trim() || activeSession.status !== 'active' || sending}
                     className="btn-primary h-10 py-1.5 px-3 text-xs disabled:opacity-60"
@@ -419,6 +617,9 @@ export default function InterviewPrep() {
                     {sending ? <Loader2 className="inline w-3 h-3 mr-1 animate-spin" /> : <MessageCircle className="inline w-3 h-3 mr-1" />}
                     Send
                   </button>
+                </div>
+                <div className="mt-2 text-[11px] text-text-muted">
+                  {sttStatusText}
                 </div>
               </div>
                 </>
