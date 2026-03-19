@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Bot, BookOpen, BrainCircuit } from 'lucide-react'
+import { Bot, BookOpen, BrainCircuit, Network } from 'lucide-react'
 
 const modules = [
   {
@@ -19,6 +19,15 @@ const modules = [
     cta: 'Coming soon',
     disabled: true,
     icon: BrainCircuit,
+  },
+  {
+    id: 'mindmap',
+    title: 'Concept Mind Map',
+    description: 'Extract and explore a concept graph from interview knowledge documents.',
+    to: '/study/mindmap',
+    cta: 'Open Mind Map',
+    disabled: false,
+    icon: Network,
   },
   {
     id: 'interview',

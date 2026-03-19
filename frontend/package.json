@@ -10,16 +10,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.5.1",
+    "axios": "^1.7.9",
+    "clsx": "^2.1.1",
+    "kokoro-js": "^1.2.1",
+    "lucide-react": "^0.462.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0",
-    "axios": "^1.7.9",
     "react-dropzone": "^14.3.5",
     "react-hot-toast": "^2.4.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.462.0",
-    "kokoro-js": "^1.2.1",
-    "@huggingface/transformers": "^3.5.1"
+    "react-router-dom": "^6.28.0",
+    "reactflow": "^11.11.4"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

@@ -8,6 +8,7 @@ import JobDetails from './pages/JobDetails'
 import InterviewPrep from './pages/InterviewPrep'
 import StudyHub from './pages/StudyHub'
 import StudyDecks from './pages/StudyDecks'
+import StudyMindMap from './pages/StudyMindMap'
 import Settings from './pages/Settings'
 import SolvePractice from './pages/SolvePractice'
 
@@ -25,6 +26,7 @@ export default function App() {
         <Route path="jobs/:id/interview-prep/voice" element={<InterviewPrep />} />
         <Route path="study" element={<StudyHub />} />
         <Route path="study/flashcards" element={<StudyDecks />} />
+        <Route path="study/mindmap" element={<StudyMindMap />} />
         <Route path="practice/coach" element={<SolvePractice />} />
         <Route path="settings" element={<Settings />} />
       </Route>

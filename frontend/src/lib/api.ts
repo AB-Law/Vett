@@ -725,6 +725,39 @@ export interface FlashcardSetItem {
   card_set: StudyCardSetSummary
 }
 
+export interface MindMapNode {
+  id: string
+  label: string
+  group: string
+}
+
+export interface MindMapEdge {
+  source: string
+  target: string
+  label: string
+}
+
+export interface MindMapGraph {
+  nodes: MindMapNode[]
+  edges: MindMapEdge[]
+}
+
+export interface StudyMindMapResponse {
+  id: number
+  job_id: number
+  doc_id: number | null
+  content_hash: string
+  graph: MindMapGraph
+  node_sources: Record<string, string>
+  created_at: string | null
+  cached: boolean
+}
+
+export interface GenerateStudyMindMapRequest {
+  job_id: number
+  doc_id?: number | null
+}
+
 export interface StudyCardSetRenameRequest {
   name: string
 }
@@ -903,6 +936,21 @@ export const renameStudyCardSet = async (
 
 export const deleteStudyCardSet = async (cardSetId: number): Promise<void> => {
   await api.delete(`/study/card-sets/${cardSetId}`)
+}
+
+export const generateStudyMindMap = async (request: GenerateStudyMindMapRequest): Promise<StudyMindMapResponse> => {
+  const { data } = await api.post<StudyMindMapResponse>('/study/mindmap', request, { timeout: 120000 })
+  return data
+}
+
+export const getStudyMindMap = async (
+  jobId: number,
+  docId?: number | null,
+): Promise<StudyMindMapResponse> => {
+  const { data } = await api.get<StudyMindMapResponse>('/study/mindmap', {
+    params: { job_id: jobId, doc_id: docId ?? undefined },
+  })
+  return data
 }
 
 // ── Practice (Phase 1) ─────────────────────────────────────────────────────────

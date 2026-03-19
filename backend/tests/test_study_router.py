@@ -12,7 +12,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from app.database import Base
 from app.models.interview import InterviewKnowledgeDocument
 from app.models.score import Job
-from app.models.study import StudyCard, StudyCardSet, StudyCardSetDocument
+from app.models.study import MindMap, StudyCard, StudyCardSet, StudyCardSetDocument
 from app.routers import study as study_router
 
 
@@ -26,6 +26,7 @@ def _new_session():
             StudyCardSet.__table__,
             StudyCard.__table__,
             StudyCardSetDocument.__table__,
+            MindMap.__table__,
         ],
     )
     return sessionmaker(bind=engine)()
@@ -235,3 +236,63 @@ def test_delete_card_set_route(monkeypatch):
     monkeypatch.setattr(study_router.flashcards, "delete_study_card_set", _fake_delete)
     response = study_router.delete_card_set(5, db=db)
     assert response["status"] == "deleted"
+
+
+def test_get_mindmap_route_returns_payload(monkeypatch):
+    db = _new_session()
+
+    def _fake_get_cached(db_session, *, job_id: int, doc_id: int | None):
+        return {
+            "id": 1,
+            "job_id": job_id,
+            "doc_id": doc_id,
+            "content_hash": "abc123",
+            "graph": {
+                "nodes": [{"id": "distributed_systems", "label": "Distributed Systems", "group": "system_design"}],
+                "edges": [],
+            },
+            "node_sources": {"distributed_systems": "Distributed systems interview notes"},
+            "created_at": "2026-03-19T12:00:00+00:00",
+        }
+
+    monkeypatch.setattr(study_router.mindmap, "get_cached_mind_map", _fake_get_cached)
+
+    response = study_router.get_mindmap(job_id=9, doc_id=3, db=db)
+
+    assert response.job_id == 9
+    assert response.doc_id == 3
+    assert response.cached is True
+    assert response.graph.nodes[0].id == "distributed_systems"
+
+
+@pytest.mark.asyncio
+async def test_create_or_get_mindmap_route_happy_path(monkeypatch):
+    db = _new_session()
+
+    async def _fake_generate(db_session, *, job_id: int, doc_id: int | None):
+        return (
+            {
+                "id": 11,
+                "job_id": job_id,
+                "doc_id": doc_id,
+                "content_hash": "hash-1",
+                "graph": {
+                    "nodes": [{"id": "queues", "label": "Queues", "group": "system_design"}],
+                    "edges": [{"source": "queues", "target": "queues", "label": "related_to"}],
+                },
+                "node_sources": {"queues": "Queue notes"},
+                "created_at": "2026-03-19T12:00:00+00:00",
+            },
+            False,
+        )
+
+    monkeypatch.setattr(study_router.mindmap, "generate_or_get_mind_map", _fake_generate)
+
+    response = await study_router.create_or_get_mindmap(
+        payload=study_router.MindMapRequest(job_id=5, doc_id=None),
+        db=db,
+    )
+
+    assert response.job_id == 5
+    assert response.cached is False
+    assert response.graph.nodes[0].id == "queues"

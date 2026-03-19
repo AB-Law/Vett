@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..database import SessionLocal, get_db
 from ..services import flashcards
 from ..services.flashcards import ReviewRating
+from ..services import mindmap
 
 
 router = APIRouter(prefix="/study", tags=["study"])
@@ -106,6 +107,39 @@ class StudyCardSetRenameRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     rating: ReviewRating
+
+
+class MindMapRequest(BaseModel):
+    job_id: int
+    doc_id: int | None = None
+
+
+class MindMapNodeResponse(BaseModel):
+    id: str
+    label: str
+    group: str
+
+
+class MindMapEdgeResponse(BaseModel):
+    source: str
+    target: str
+    label: str
+
+
+class MindMapGraphResponse(BaseModel):
+    nodes: list[MindMapNodeResponse]
+    edges: list[MindMapEdgeResponse]
+
+
+class MindMapResponse(BaseModel):
+    id: int
+    job_id: int
+    doc_id: int | None = None
+    content_hash: str
+    graph: MindMapGraphResponse
+    node_sources: dict[str, str] = Field(default_factory=dict)
+    created_at: str | None = None
+    cached: bool = False
 
 
 def _now_iso() -> str:
@@ -301,3 +335,42 @@ def review_flashcard(
             raise HTTPException(status_code=404, detail=detail)
         raise HTTPException(status_code=400, detail=detail)
     return FlashcardResponse.model_validate(flashcards.serialize_study_card(card))
+
+
+@router.post("/mindmap", response_model=MindMapResponse)
+async def create_or_get_mindmap(
+    payload: MindMapRequest,
+    db: Session = Depends(get_db),
+) -> MindMapResponse:
+    try:
+        result, from_cache = await mindmap.generate_or_get_mind_map(
+            db,
+            job_id=payload.job_id,
+            doc_id=payload.doc_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
+    return MindMapResponse.model_validate({**result, "cached": from_cache})
+
+
+@router.get("/mindmap", response_model=MindMapResponse)
+def get_mindmap(
+    job_id: int = Query(..., ge=1),
+    doc_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+) -> MindMapResponse:
+    try:
+        result = mindmap.get_cached_mind_map(
+            db,
+            job_id=job_id,
+            doc_id=doc_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
+    return MindMapResponse.model_validate({**result, "cached": True})

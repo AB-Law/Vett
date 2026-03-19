@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -49,3 +49,17 @@ class StudyCardSetDocument(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     card_set = relationship("StudyCardSet", back_populates="selected_documents")
+
+
+class MindMap(Base):
+    __tablename__ = "mind_maps"
+    __table_args__ = (
+        UniqueConstraint("job_id", "doc_id", "content_hash", name="uq_mind_maps_job_doc_hash"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), index=True, nullable=False)
+    doc_id = Column(Integer, ForeignKey("interview_knowledge_documents.id"), index=True, nullable=True)
+    content_hash = Column(String(64), nullable=False, index=True)
+    graph_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

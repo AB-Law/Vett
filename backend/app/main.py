@@ -587,6 +587,51 @@ def _ensure_study_card_sets_columns() -> None:
         )
 
 
+def _ensure_mind_maps_table() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        if "mind_maps" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS mind_maps (
+                      id INTEGER PRIMARY KEY,
+                      job_id INTEGER NOT NULL REFERENCES jobs(id),
+                      doc_id INTEGER NULL REFERENCES interview_knowledge_documents(id),
+                      content_hash VARCHAR(64) NOT NULL,
+                      graph_json JSON NOT NULL,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+            )
+        connection.execute(
+            text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_mind_maps_job_doc_hash" '
+                'ON "mind_maps" ("job_id", "doc_id", "content_hash");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_mind_maps_job_id" '
+                'ON "mind_maps" ("job_id");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_mind_maps_doc_id" '
+                'ON "mind_maps" ("doc_id");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_mind_maps_content_hash" '
+                'ON "mind_maps" ("content_hash");'
+            )
+        )
+
+
 def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_seconds: float = 1.0) -> None:
     for attempt in range(1, max_attempts + 1):
         try:
@@ -604,6 +649,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_interview_chat_sessions_table()
             _ensure_interview_chat_turns_uniqueness()
             _ensure_study_card_sets_columns()
+            _ensure_mind_maps_table()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")
             return
