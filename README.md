@@ -16,6 +16,51 @@ docker compose up --build
 open http://localhost:5173
 ```
 
+## Use published Docker images
+
+If you pull images directly from GitHub Container Registry instead of cloning this repo, provide credentials at runtime via environment variables.
+
+1. Set your provider keys in a local `.env` file (never committed to git).
+2. Pull and run backend:
+
+```bash
+cp .env.example .env
+# edit .env with values like OPENAI_API_KEY / ANTHROPIC_API_KEY / AZURE_OPENAI_API_KEY
+docker run --rm -p 8000:8000 --env-file .env ghcr.io/<owner>/vett-backend:latest
+```
+
+3. Pull and run frontend:
+
+```bash
+docker run --rm -p 5173:5173 -e VITE_API_URL=http://host.docker.internal:8000 ghcr.io/<owner>/vett-frontend:latest
+```
+
+For `VITE_API_URL`, use your backend host as seen by the container:
+- same host machine: `http://host.docker.internal:8000`
+- remote host: `https://your-domain-or-host`
+
+## Run with docker-compose from images
+
+You can also use these services with image names in Compose:
+
+```yaml
+services:
+  backend:
+    image: ghcr.io/<owner>/vett-backend:latest
+    env_file: .env
+    ports:
+      - "8000:8000"
+
+  frontend:
+    image: ghcr.io/<owner>/vett-frontend:latest
+    environment:
+      - VITE_API_URL=http://backend:8000
+    ports:
+      - "5173:5173"
+```
+
+Replace `<owner>` with your lowercase GitHub org/user name used for the registry path.
+
 ## Features
 
 ### Phase 1 (fully implemented)
