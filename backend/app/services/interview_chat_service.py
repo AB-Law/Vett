@@ -928,6 +928,11 @@ def _thread_followup_prompt(thread: ThreadState, message: str, *, is_vague: bool
             f"Let's stay on {thread['category'].replace('_', ' ')} for a moment: "
             "give one concrete example with your actions, constraints, and measurable outcome."
         )
+    if thread["follow_up_count"] >= 1 and not _has_measurable_outcome(message):
+        return (
+            "Let's make this concrete before we continue: pick one real project and answer in 4 lines - "
+            "context, what you personally changed, how you validated it, and one measurable outcome."
+        )
     if thread["category"] == "system_design":
         return (
             "Good start. Go deeper on trade-offs: explain failure modes, scaling limits, "
