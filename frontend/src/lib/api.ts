@@ -640,6 +640,95 @@ export interface InterviewResearchQuestionBank {
   source_urls: string[]
 }
 
+export interface StudyCard {
+  id: number
+  front: string
+  back: string
+  last_reviewed_at: string | null
+  ease_factor: number
+  interval_days: number
+}
+
+export interface FlashcardSetResponse {
+  card_set_id: number
+  cards: StudyCard[]
+  card_set: StudyCardSetSummary
+  card_sets: FlashcardSetItem[]
+  parent_card_set_id: number | null
+  generation_diagnostics?: FlashcardGenerationDiagnostics
+}
+
+export type FlashcardGenerationJobStatus = 'pending' | 'running' | 'completed' | 'failed'
+
+export interface FlashcardGenerationDiagnostics {
+  requested_cards: number
+  llm_cards_parsed: number
+  deduped_out: number
+  fallback_cards_used: number
+  fallback_used: boolean
+}
+
+export interface FlashcardGenerationStartResponse {
+  job_id: string
+  status: FlashcardGenerationJobStatus
+}
+
+export interface FlashcardGenerationJobResponse {
+  job_id: string
+  status: FlashcardGenerationJobStatus
+  created_at: string
+  updated_at: string
+  error: string | null
+  result: FlashcardSetResponse | null
+}
+
+export interface GenerateFlashcardsRequest {
+  job_id?: number
+  document_ids?: number[]
+  name?: string
+  topic?: string
+  num_cards?: number
+  generate_per_section?: boolean
+}
+
+export interface StudyCardReviewRequest {
+  rating: 'easy' | 'hard'
+}
+
+export interface StudyCardSetSummary {
+  id: number
+  job_id: number | null
+  parent_card_set_id: number | null
+  name: string
+  topic: string | null
+  created_at: string | null
+  card_count: number
+  document_ids: number[]
+  document_count: number
+}
+
+export interface StudyCardSetDetailResponse {
+  card_set_id: number
+  job_id: number | null
+  parent_card_set_id: number | null
+  name: string
+  topic: string | null
+  created_at: string | null
+  cards: StudyCard[]
+  document_ids: number[]
+  document_count: number
+}
+
+export interface FlashcardSetItem {
+  card_set_id: number
+  cards: StudyCard[]
+  card_set: StudyCardSetSummary
+}
+
+export interface StudyCardSetRenameRequest {
+  name: string
+}
+
 export interface InterviewResearchSession {
   session_id: string
   role: string
@@ -767,6 +856,53 @@ export interface JobAnalysisResult {
 export const analyzeJob = async (jobId: number): Promise<JobAnalysisResult> => {
   const { data } = await api.post<JobAnalysisResult>(`/jobs/${jobId}/analyze`, {}, { timeout: 180000 })
   return data
+}
+
+export const generateStudyFlashcards = async (request: GenerateFlashcardsRequest): Promise<FlashcardSetResponse> => {
+  const { data } = await api.post<FlashcardSetResponse>('/study/flashcards', request, { timeout: 120000 })
+  return data
+}
+
+export const generateStudyFlashcardsAsync = async (
+  request: GenerateFlashcardsRequest,
+): Promise<FlashcardGenerationStartResponse> => {
+  const { data } = await api.post<FlashcardGenerationStartResponse>('/study/flashcards/async', request)
+  return data
+}
+
+export const getStudyFlashcardsJob = async (jobId: string): Promise<FlashcardGenerationJobResponse> => {
+  const { data } = await api.get<FlashcardGenerationJobResponse>(`/study/flashcards/jobs/${encodeURIComponent(jobId)}`)
+  return data
+}
+
+export const reviewStudyCard = async (
+  cardId: number,
+  request: StudyCardReviewRequest,
+): Promise<StudyCard> => {
+  const { data } = await api.patch<StudyCard>(`/study/cards/${cardId}/review`, request)
+  return data
+}
+
+export const listStudyCardSets = async (limit = 20): Promise<StudyCardSetSummary[]> => {
+  const { data } = await api.get<StudyCardSetSummary[]>('/study/card-sets', { params: { limit } })
+  return data
+}
+
+export const getStudyCardSet = async (cardSetId: number): Promise<StudyCardSetDetailResponse> => {
+  const { data } = await api.get<StudyCardSetDetailResponse>(`/study/card-sets/${cardSetId}`)
+  return data
+}
+
+export const renameStudyCardSet = async (
+  cardSetId: number,
+  payload: StudyCardSetRenameRequest,
+): Promise<StudyCardSetSummary> => {
+  const { data } = await api.patch<StudyCardSetSummary>(`/study/card-sets/${cardSetId}`, payload)
+  return data
+}
+
+export const deleteStudyCardSet = async (cardSetId: number): Promise<void> => {
+  await api.delete(`/study/card-sets/${cardSetId}`)
 }
 
 // ── Practice (Phase 1) ─────────────────────────────────────────────────────────

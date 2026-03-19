@@ -65,4 +65,180 @@
   .score-badge-red {
     @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700;
   }
+
+  .study-page {
+    @apply max-w-4xl mx-auto px-4 py-6 space-y-5;
+  }
+
+  .loading-wrap,
+  .error {
+    @apply text-sm text-text-muted;
+  }
+
+  .study-header {
+    @apply flex flex-col gap-2;
+  }
+
+  .back-link {
+    @apply text-sm text-text-secondary flex items-center gap-2 hover:text-sage-700;
+  }
+
+  .study-header h1 {
+    @apply text-2xl font-semibold;
+  }
+
+  .study-header p {
+    @apply text-sm text-text-muted;
+  }
+
+  .study-modules-grid {
+    @apply grid gap-4 md:grid-cols-3;
+  }
+
+  .study-module-card {
+    @apply card p-5 flex flex-col gap-4;
+  }
+
+  .study-module-card-disabled {
+    @apply opacity-70;
+  }
+
+  .study-module-icon-wrap {
+    @apply w-10 h-10 rounded-lg bg-sage-100 text-sage-700 flex items-center justify-center;
+  }
+
+  .study-module-cta {
+    @apply inline-flex w-fit items-center rounded-md border border-sage-600 px-3 py-1.5 text-xs font-medium text-sage-700 hover:bg-sage-50;
+  }
+
+  .study-module-cta-disabled {
+    @apply inline-flex w-fit items-center rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text-muted;
+  }
+
+  .study-controls {
+    @apply grid gap-3 md:grid-cols-[1fr_120px_auto] items-end;
+  }
+
+  .study-controls label {
+    @apply flex flex-col gap-1 text-sm;
+  }
+
+  .study-controls input {
+    @apply input;
+  }
+
+  .study-controls button {
+    @apply btn-primary h-10;
+  }
+
+  .study-meta {
+    @apply text-sm text-text-muted;
+  }
+
+  .study-progress p {
+    @apply text-xs text-text-muted;
+  }
+
+  .progress-track {
+    @apply h-2 bg-gray-200 rounded-full overflow-hidden mb-2;
+  }
+
+  .progress-fill {
+    @apply h-full bg-sage-600 transition-all duration-300;
+  }
+
+  .empty-state {
+    @apply card p-6 space-y-3;
+  }
+
+  .study-card-wrap {
+    @apply card p-6 space-y-5 max-w-3xl mx-auto;
+  }
+
+  .study-session-header {
+    @apply space-y-1;
+  }
+
+  .study-session-title {
+    @apply text-base font-semibold text-text-primary;
+  }
+
+  .study-session-help {
+    @apply text-xs text-text-muted;
+  }
+
+  .study-session-meta {
+    @apply flex items-center justify-between text-xs text-text-muted pt-1;
+  }
+
+  .card-flip {
+    perspective: 900px;
+  }
+
+  .card-flip-inner {
+    @apply relative h-56 transition-transform duration-500;
+    transform-style: preserve-3d;
+  }
+
+  .card-flip-inner.flipped {
+    transform: rotateY(180deg);
+  }
+
+  .card-face {
+    @apply absolute inset-0 rounded-lg border px-5 py-4 flex items-start leading-relaxed;
+    backface-visibility: hidden;
+  }
+
+  .card-front {
+    @apply text-base border-slate-700 text-slate-100;
+    background: #141a1a;
+  }
+
+  .card-back {
+    @apply text-base border-sage-900 text-slate-100;
+    background: #16241b;
+    transform: rotateY(180deg);
+  }
+
+  .study-buttons {
+    @apply flex gap-3 justify-end;
+  }
+
+  .study-buttons button {
+    @apply px-4 py-2 rounded-md text-sm font-medium min-w-24;
+  }
+
+  .btn-hard {
+    @apply bg-transparent text-text-secondary border border-border hover:bg-gray-100;
+  }
+
+  .btn-easy {
+    @apply bg-sage-600 text-white border border-sage-600 hover:bg-sage-700;
+  }
+
+  .study-tip {
+    @apply text-xs text-text-muted;
+  }
+
+  .study-footer {
+    @apply flex items-center gap-2 text-xs text-text-muted;
+  }
+
+  .small-icon {
+    @apply text-sage-700;
+    width: 14px;
+    height: 14px;
+  }
+
+  .spinner {
+    @apply h-4 w-4 animate-spin;
+  }
+
+  .study-modal-overlay {
+    @apply fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4;
+  }
+
+  .study-modal {
+    @apply w-full max-w-2xl p-5;
+  }
 }
