@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 import uuid
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -40,6 +42,8 @@ from .llm import (
     score_cv_against_jd,
 )
 
+logger = logging.getLogger(__name__)
+
 LIFECYCLE_STEPS = (
     AGENT_STATE_ROLE_ANALYSIS,
     AGENT_STATE_EVIDENCE_SCAN,
@@ -48,6 +52,42 @@ LIFECYCLE_STEPS = (
     AGENT_STATE_ACTION_PLAN,
     AGENT_STATE_REWRITE_PLAN,
 )
+
+SCORING_EXECUTOR_MAX_ATTEMPTS = 2
+SCORE_TERM_PATTERN = re.compile(r"[a-z0-9][a-z0-9+\-/]*")
+MISSING_HINT_PATTERN = re.compile(
+    r"\b(missing|lack(?:ing)?|gap(?:s)?|need(?:s|ed)?|insufficient|improve(?:ment)?|strengthen|requires?)\b",
+    re.IGNORECASE,
+)
+SCORE_KEYWORD_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "if",
+    "in",
+    "is",
+    "it",
+    "its",
+    "no",
+    "not",
+    "of",
+    "on",
+    "or",
+    "the",
+    "this",
+    "that",
+    "to",
+    "with",
+    "your",
+    "you",
+}
 
 
 @dataclass
@@ -58,6 +98,8 @@ class OrchestratorResult:
     result: dict[str, Any]
     transitions: list[AgentRunTransition]
     artifacts: list[AgentRunArtifact]
+    failure_reason: str | None = None
+    failed_step: str | None = None
 
 
 def _coerce_text(value: Any) -> str:
@@ -74,6 +116,135 @@ def _coerce_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _coerce_evidence_records(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    return []
+
+
+def _coerce_string_items(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else []
+    return []
+
+
+def _keyword_terms(value: Any) -> set[str]:
+    return {
+        match.group(0)
+        for match in SCORE_TERM_PATTERN.finditer(_coerce_text(value).lower())
+        if match.group(0) not in SCORE_KEYWORD_STOPWORDS and len(match.group(0)) > 1
+    }
+
+
+def _has_term_overlap(reference: Any, candidate: Any) -> bool:
+    reference_terms = _keyword_terms(reference)
+    if not reference_terms:
+        return False
+    candidate_terms = _keyword_terms(candidate)
+    if not candidate_terms:
+        return False
+    return bool(reference_terms.intersection(candidate_terms))
+
+
+def _normalize_gap_analysis_claims(gap_analysis: str) -> list[str]:
+    normalized = _coerce_text(gap_analysis)
+    if not normalized:
+        return []
+
+    claims: list[str] = []
+    for sentence in re.split(r"[.!?\n]", normalized):
+        sentence = sentence.strip()
+        if not sentence or not MISSING_HINT_PATTERN.search(sentence):
+            continue
+
+        stripped_sentence = MISSING_HINT_PATTERN.sub("", sentence).strip(" -,:").strip()
+        for chunk in re.split(r"\band\b|,|;|\*", stripped_sentence, flags=re.IGNORECASE):
+            candidate = _coerce_text(chunk)
+            if not candidate or len(_keyword_terms(candidate)) < 1:
+                continue
+            if len(candidate) > 90:
+                continue
+            claims.append(candidate)
+
+    if claims:
+        return claims
+
+    fallback = [
+        _coerce_text(part)
+        for part in re.split(r"[;,\n]", normalized)
+        if _coerce_text(part) and MISSING_HINT_PATTERN.search(part)
+    ]
+    return fallback[:8]
+
+
+def _validate_scoring_output_payload(
+    score_payload: Any,
+    scoring_plan: dict[str, Any],
+) -> list[str]:
+    """Validate the raw score payload before downstream normalization."""
+    if not isinstance(score_payload, dict):
+        return ["Score payload must be a mapping."]
+
+    required_fields = (
+        "fit_score",
+        "matched_keywords",
+        "missing_keywords",
+        "gap_analysis",
+        "rewrite_suggestions",
+    )
+    missing_fields = [field for field in required_fields if field not in score_payload]
+    if missing_fields:
+        return [f"Score payload missing field: {name}" for name in missing_fields]
+
+    issues: list[str] = []
+    try:
+        int(score_payload["fit_score"])
+    except Exception:
+        issues.append("Score payload field 'fit_score' must be an integer-compatible value.")
+
+    if not isinstance(score_payload["matched_keywords"], list):
+        issues.append("Score payload field 'matched_keywords' must be a list.")
+    if not isinstance(score_payload["missing_keywords"], list):
+        issues.append("Score payload field 'missing_keywords' must be a list.")
+    if not isinstance(score_payload["rewrite_suggestions"], list):
+        issues.append("Score payload field 'rewrite_suggestions' must be a list.")
+    if not isinstance(score_payload["gap_analysis"], str):
+        issues.append("Score payload field 'gap_analysis' must be a string.")
+
+    missing_keywords = _coerce_string_items(score_payload.get("missing_keywords"))
+    gap_analysis = score_payload.get("gap_analysis")
+    for keyword in missing_keywords:
+        if not _has_term_overlap(gap_analysis, keyword):
+            issues.append(f"Gap analysis does not mention missing keyword '{keyword}'.")
+
+    gap_claims = _normalize_gap_analysis_claims(_coerce_text(gap_analysis))
+    for claim in gap_claims:
+        if not _has_term_overlap(" ".join(missing_keywords), claim):
+            issues.append(f"Gap-analysis claim '{claim}' is not represented in missing_keywords.")
+
+    role_signal_hypotheses = _coerce_string_items(scoring_plan.get("missing_keyword_hypotheses"))
+    for hypothesis in role_signal_hypotheses:
+        if not (
+            _has_term_overlap(gap_analysis, hypothesis)
+            or _has_term_overlap(missing_keywords, hypothesis)
+        ):
+            issues.append(f"Planned missing-signal hypothesis '{hypothesis}' is not represented in score outputs.")
+
+    return issues
+
+
+def _reconcile_scoring_plan_with_feedback(
+    scoring_plan: dict[str, Any],
+    critic_feedback: list[str],
+) -> dict[str, Any]:
+    reconciled = _coerce_dict(scoring_plan)
+    reconciled["critic_feedback"] = critic_feedback[:3]
+    return reconciled
 
 
 def _normalize_request_key(
@@ -110,7 +281,11 @@ def _coerce_score_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "matched_keywords": _coerce_list(payload.get("matched_keywords")),
         "missing_keywords": _coerce_list(payload.get("missing_keywords")),
         "gap_analysis": _coerce_text(payload.get("gap_analysis")),
+        "reason": _coerce_text(payload.get("reason")),
         "rewrite_suggestions": _coerce_list(payload.get("rewrite_suggestions")),
+        "matched_keyword_evidence": _coerce_evidence_records(payload.get("matched_keyword_evidence")),
+        "missing_keyword_evidence": _coerce_evidence_records(payload.get("missing_keyword_evidence")),
+        "rewrite_suggestion_evidence": _coerce_evidence_records(payload.get("rewrite_suggestion_evidence")),
     }
 
 
@@ -242,9 +417,39 @@ async def _run_scoring_step(
     jd_text: str,
     role_signal_map: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    score_payload = await score_cv_against_jd(cv_text, jd_text, role_signal_map=role_signal_map)
-    if not isinstance(score_payload, dict):
-        raise ValueError("Score payload must be a mapping.")
+    scoring_plan = await _run_scoring_planner_step(
+        cv_text,
+        jd_text,
+        role_signal_map,
+    )
+    score_payload = {}
+    critic_retries = 0
+
+    last_critic_feedback: list[str] = []
+    for attempt in range(1, SCORING_EXECUTOR_MAX_ATTEMPTS + 1):
+        score_payload = await _run_scoring_execution_step(
+            cv_text=cv_text,
+            jd_text=jd_text,
+            role_signal_map=role_signal_map,
+            scoring_plan=scoring_plan,
+        )
+        critic_feedback = _run_score_critic_step(score_payload, scoring_plan)
+        if not critic_feedback:
+            break
+
+        last_critic_feedback = critic_feedback
+        if attempt >= SCORING_EXECUTOR_MAX_ATTEMPTS:
+            logger.warning(
+                "Score payload did not fully satisfy critic after %s attempt(s). Issues: %s",
+                attempt,
+                "; ".join(critic_feedback),
+            )
+            raise ValueError(
+                "Scoring output failed validator after "
+                f"{attempt} attempt(s): {('; '.join(critic_feedback))}"
+            )
+        critic_retries += 1
+        scoring_plan = _reconcile_scoring_plan_with_feedback(scoring_plan, critic_feedback)
 
     normalized = _coerce_score_payload(_coerce_dict(score_payload))
     evidence = {
@@ -252,6 +457,9 @@ async def _run_scoring_step(
         "matched_count": len(normalized["matched_keywords"]),
         "missing_count": len(normalized["missing_keywords"]),
     }
+    if critic_retries:
+        evidence["critic_retries"] = critic_retries
+        evidence["critic_feedback"] = last_critic_feedback
     return normalized, evidence
 
 
@@ -314,6 +522,61 @@ def _run_rewrite_plan_step(score_payload: dict[str, Any]) -> tuple[dict[str, Any
     return artifact, evidence
 
 
+async def _run_scoring_planner_step(
+    cv_text: str,
+    jd_text: str,
+    role_signal_map: dict[str, Any],
+) -> dict[str, Any]:
+    role_signal = _coerce_dict(role_signal_map)
+    missing_hypotheses = (
+        _coerce_string_items(role_signal.get("required_skills"))
+        + _coerce_string_items(role_signal.get("secondary_skills"))
+    )
+    if not missing_hypotheses:
+        missing_hypotheses = _coerce_string_items(role_signal.get("responsibilities"))
+    if not missing_hypotheses and _coerce_text(role_signal.get("role_summary")):
+        missing_hypotheses = [_coerce_text(role_signal.get("role_summary"))]
+
+    return {
+        "score_schema_fields": [
+            "fit_score",
+            "matched_keywords",
+            "missing_keywords",
+            "gap_analysis",
+            "rewrite_suggestions",
+        ],
+        "missing_keyword_hypotheses": missing_hypotheses[:8],
+        "score_context": {
+            "role_summary": _coerce_text(role_signal.get("role_summary")),
+            "jd_hint": _coerce_text(jd_text)[:1400],
+            "cv_hint": _coerce_text(cv_text)[:1600],
+        },
+    }
+
+
+async def _run_scoring_execution_step(
+    cv_text: str,
+    jd_text: str,
+    role_signal_map: dict[str, Any],
+    scoring_plan: dict[str, Any],
+) -> Any:
+    execution_context = _coerce_dict(role_signal_map)
+    execution_context["scoring_plan"] = _coerce_dict(scoring_plan)
+    score_payload = await score_cv_against_jd(
+        cv_text=cv_text,
+        jd_text=jd_text,
+        role_signal_map=execution_context,
+    )
+    return score_payload
+
+
+def _run_score_critic_step(
+    score_payload: Any,
+    scoring_plan: dict[str, Any],
+) -> list[str]:
+    return _validate_scoring_output_payload(score_payload, scoring_plan)
+
+
 def _snapshot_result_context(db: Session, run_id: str) -> dict[str, Any]:
     context: dict[str, Any] = {
         "role_signal_map": {},
@@ -361,6 +624,7 @@ def _normalize_final_response(
         rewrite_suggestions = _coerce_list(rewrite_artifact.payload.get("rewrite_suggestions"))
 
     normalized = _coerce_score_payload(scoring_payload)
+    normalized["reason"] = _coerce_text(current_score.get("reason")) or normalized.get("reason")
     normalized["gap_analysis"] = gap_analysis
     normalized["rewrite_suggestions"] = rewrite_suggestions
     normalized["agent_plan"] = current_score.get("agent_plan") or _coerce_dict(current_score.get("role_signal_map"))
@@ -488,11 +752,20 @@ async def _run_pipeline_with_idempotent_steps(
             db.add(transition)
             db.add(run)
             db.commit()
+            logger.warning(
+                "Agent run %s failed at step=%s attempt=%s reason=%r",
+                run.id,
+                step,
+                attempt,
+                _coerce_text(exc),
+            )
 
             return OrchestratorResult(
                 run_id=run.id,
                 current_state=run.current_state,
                 status=run.status,
+                failure_reason=_coerce_text(exc),
+                failed_step=step,
                 result=_normalize_final_response(
                     run.id,
                     db,
@@ -531,6 +804,8 @@ async def _run_pipeline_with_idempotent_steps(
         run_id=run.id,
         current_state=run.current_state,
         status=run.status,
+        failure_reason=run.failure_reason,
+        failed_step=run.failed_step,
         result=_normalize_final_response(
             run.id,
             db,
@@ -601,6 +876,8 @@ async def execute_scoring_orchestrator(
             run_id=run.id,
             current_state=run.current_state,
             status=run.status,
+            failure_reason=_coerce_text(run.failure_reason),
+            failed_step=run.failed_step,
             result=_normalize_final_response(
                 run.id,
                 db,

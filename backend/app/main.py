@@ -6,15 +6,19 @@ import time
 from collections import OrderedDict
 
 from sqlalchemy import inspect, text
+
+sa_text = text
 from sqlalchemy.exc import OperationalError
 
 from .database import Base, SessionLocal, engine
-from .models import cv, score, practice  # noqa: F401 – register models
+from .models import cv, interview_chat, practice, score, user_profile  # noqa: F401 - register models
 from .routers import cv as cv_router
 from .routers import score as score_router
 from .routers import settings as settings_router
+from .routers import profile as profile_router
 from .routers import jobs as jobs_router
 from .routers import practice as practice_router
+from .routers import interview_chat as interview_chat_router
 from .routers import local_context as local_context_router
 from .services.practice_embedder import run_embedding_worker
 
@@ -47,6 +51,7 @@ def _ensure_jobs_columns() -> None:
             ("job_poster_name", "VARCHAR(255)"),
             ("job_poster_title", "VARCHAR(255)"),
             ("job_poster_profile_url", "TEXT"),
+            ("reason", "TEXT"),
         ]
     )
 
@@ -72,7 +77,13 @@ def _ensure_score_history_columns() -> None:
         return
 
     existing_columns = {column["name"] for column in inspector.get_columns("score_history")}
-    expected_columns = OrderedDict([("agent_plan", "JSON")])
+    expected_columns = OrderedDict([
+        ("reason", "TEXT"),
+        ("agent_plan", "JSON"),
+        ("matched_keyword_evidence", "JSON"),
+        ("missing_keyword_evidence", "JSON"),
+        ("rewrite_suggestion_evidence", "JSON"),
+    ])
 
     with engine.begin() as connection:
         for column_name, column_type in expected_columns.items():
@@ -139,6 +150,7 @@ def _backfill_agent_runs_from_score_history() -> None:
                     "matched_keywords": row.matched_keywords or [],
                     "missing_keywords": row.missing_keywords or [],
                     "gap_analysis": row.gap_analysis or "",
+                    "reason": row.reason or "",
                     "rewrite_suggestions": row.rewrite_suggestions or [],
                 }
                 run_transition = AgentRunTransition(
@@ -322,6 +334,189 @@ def _ensure_practice_questions_columns() -> None:
             if str(dim) not in current_type:
                 conn.execute(sa_text("ALTER TABLE practice_questions DROP COLUMN embedding;"))
                 conn.execute(sa_text(f"ALTER TABLE practice_questions ADD COLUMN embedding vector({dim});"))
+        additional_columns = {
+            "scope_type": "VARCHAR(16)",
+            "scope_job_id": "INTEGER",
+            "source_table": "VARCHAR(64)",
+            "source_id": "INTEGER",
+            "source_window": "VARCHAR(64)",
+        }
+        for name, column_type in additional_columns.items():
+            if name in existing:
+                continue
+            conn.execute(sa_text(f'ALTER TABLE practice_questions ADD COLUMN "{name}" {column_type};'))
+        existing_indexes = {index["name"] for index in inspector.get_indexes("practice_questions")}
+        index_map = {
+            "ix_practice_questions_scope_type": "scope_type",
+            "ix_practice_questions_scope_job_id": "scope_job_id",
+            "ix_practice_questions_source_table": "source_table",
+            "ix_practice_questions_source_id": "source_id",
+            "ix_practice_questions_source_window": "source_window",
+        }
+        for index_name, column_name in index_map.items():
+            if index_name not in existing_indexes:
+                conn.execute(sa_text(f'CREATE INDEX IF NOT EXISTS "{index_name}" ON practice_questions ("{column_name}");'))
+
+
+def _ensure_interview_documents_columns() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_knowledge_documents" not in table_names:
+        return
+
+    existing = {col["name"] for col in inspector.get_columns("interview_knowledge_documents")}
+    with engine.begin() as conn:
+        expected_columns = {
+            "id": "INTEGER",
+            "owner_type": "VARCHAR(16)",
+            "job_id": "INTEGER",
+            "source_filename": "VARCHAR(255)",
+            "content_type": "VARCHAR(80)",
+            "parsed_text": "TEXT",
+            "parser_version": "VARCHAR(64)",
+            "source_ref": "VARCHAR(120)",
+            "status": "VARCHAR(24)",
+            "error_message": "TEXT",
+            "total_chunks": "INTEGER DEFAULT 0",
+            "embedded_chunks": "INTEGER DEFAULT 0",
+            "parsed_word_count": "INTEGER DEFAULT 0",
+            "chunk_coverage_ratio": "FLOAT DEFAULT 0",
+            "created_by_user_id": "VARCHAR(120)",
+        }
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing:
+                continue
+            conn.execute(sa_text(f'ALTER TABLE interview_knowledge_documents ADD COLUMN "{column_name}" {column_type};'))
+        indexes = {index["name"] for index in inspector.get_indexes("interview_knowledge_documents")}
+        index_sql = [
+            ('"ix_interview_knowledge_documents_owner_type"', 'owner_type'),
+            ('"ix_interview_knowledge_documents_job_id"', 'job_id'),
+            ('"ix_interview_knowledge_documents_status"', 'status'),
+        ]
+        for index_name, column_name in index_sql:
+            if index_name.strip('"') in indexes:
+                continue
+            conn.execute(sa_text(f'CREATE INDEX IF NOT EXISTS {index_name} ON interview_knowledge_documents ("{column_name}");'))
+        conn.execute(
+            sa_text(
+                "UPDATE interview_knowledge_documents "
+                "SET total_chunks = COALESCE(total_chunks, 0), "
+                "    embedded_chunks = COALESCE(embedded_chunks, 0), "
+                "    parsed_word_count = COALESCE(parsed_word_count, 0), "
+                "    chunk_coverage_ratio = COALESCE(chunk_coverage_ratio, 0);"
+            )
+        )
+
+
+def _ensure_interview_research_sessions_table() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_research_sessions" not in table_names:
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("interview_research_sessions")}
+    expected_columns = {
+        "id": "INTEGER",
+        "session_id": "VARCHAR(64)",
+        "job_id": "INTEGER",
+        "role": "VARCHAR(255)",
+        "company": "VARCHAR(255)",
+        "status": "VARCHAR(32)",
+        "stage": "VARCHAR(40)",
+        "question_bank": "JSON",
+        "source_urls": "JSON",
+        "fallback_used": "BOOLEAN",
+        "failure_reason": "VARCHAR(500)",
+        "created_at": "TIMESTAMP",
+        "updated_at": "TIMESTAMP",
+        "completed_at": "TIMESTAMP",
+        "started_at": "TIMESTAMP",
+        "processing_ms": "INTEGER",
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing:
+                continue
+            connection.execute(sa_text(f'ALTER TABLE "interview_research_sessions" ADD COLUMN "{column_name}" {column_type};'))
+
+
+def _ensure_interview_chat_sessions_table() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_chat_sessions" not in table_names:
+        return
+    existing = {column["name"] for column in inspector.get_columns("interview_chat_sessions")}
+    expected_columns = {
+        "id": "INTEGER",
+        "session_id": "VARCHAR(64)",
+        "job_id": "INTEGER",
+        "label": "VARCHAR(120)",
+        "status": "VARCHAR(24)",
+        "phase": "VARCHAR(32)",
+        "current_question_index": "INTEGER",
+        "is_waiting_for_candidate_question": "BOOLEAN",
+        "question_plan": "JSON",
+        "session_metadata": "JSON",
+        "handoff_run_id": "VARCHAR(64)",
+        "created_at": "TIMESTAMP",
+        "updated_at": "TIMESTAMP",
+        "completed_at": "TIMESTAMP",
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in expected_columns.items():
+            if column_name in existing:
+                continue
+            connection.execute(sa_text(f'ALTER TABLE "interview_chat_sessions" ADD COLUMN "{column_name}" {column_type};'))
+
+        if engine.dialect.name == "postgresql":
+            connection.execute(
+                sa_text(
+                    "UPDATE interview_chat_sessions "
+                    "SET question_plan = COALESCE(question_plan, '[]'::json), "
+                    "    session_metadata = COALESCE(session_metadata, '{}'::json), "
+                    "    current_question_index = COALESCE(current_question_index, 0), "
+                    "    is_waiting_for_candidate_question = COALESCE(is_waiting_for_candidate_question, FALSE);"
+                )
+            )
+        else:
+            connection.execute(
+                sa_text(
+                    "UPDATE interview_chat_sessions "
+                    "SET question_plan = COALESCE(question_plan, '[]'), "
+                    "    session_metadata = COALESCE(session_metadata, '{}'), "
+                    "    current_question_index = COALESCE(current_question_index, 0), "
+                    "    is_waiting_for_candidate_question = COALESCE(is_waiting_for_candidate_question, 0);"
+                )
+            )
+
+
+def _ensure_interview_chat_turns_uniqueness() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "interview_chat_turns" not in table_names:
+        return
+
+    with engine.begin() as connection:
+        # Keep the earliest row per (session_id, turn_index) before applying uniqueness.
+        connection.execute(
+            sa_text(
+                "DELETE FROM interview_chat_turns "
+                "WHERE id IN ("
+                "  SELECT t1.id "
+                "  FROM interview_chat_turns t1 "
+                "  JOIN interview_chat_turns t2 "
+                "    ON t1.session_id = t2.session_id "
+                "   AND t1.turn_index = t2.turn_index "
+                "   AND t1.id > t2.id"
+                ");"
+            )
+        )
+        connection.execute(
+            sa_text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uix_interviewchatturn_session_turn" '
+                'ON "interview_chat_turns" ("session_id", "turn_index");'
+            )
+        )
 
 
 def _ensure_pgvector_index() -> None:
@@ -346,6 +541,10 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_local_context_tool_call_columns()
             _backfill_agent_runs_from_score_history()
             _ensure_practice_questions_columns()
+            _ensure_interview_documents_columns()
+            _ensure_interview_research_sessions_table()
+            _ensure_interview_chat_sessions_table()
+            _ensure_interview_chat_turns_uniqueness()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")
             return
@@ -381,8 +580,10 @@ app.add_middleware(
 app.include_router(cv_router.router, prefix="/api")
 app.include_router(score_router.router, prefix="/api")
 app.include_router(settings_router.router, prefix="/api")
+app.include_router(profile_router.router, prefix="/api")
 app.include_router(jobs_router.router, prefix="/api")
 app.include_router(practice_router.router, prefix="/api")
+app.include_router(interview_chat_router.router, prefix="/api")
 app.include_router(local_context_router.router, prefix="/api")
 
 

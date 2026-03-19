@@ -11,9 +11,51 @@ import {
   Save,
   AlertCircle,
 } from 'lucide-react'
-import { scoreJD, type ScoreResult } from '../lib/api'
+import { scoreJD, type ScoreEvidenceRecord, type ScoreResult } from '../lib/api'
 import { scoreColorHex } from '../lib/utils'
 import toast from 'react-hot-toast'
+
+function normalizeEvidenceValue(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+function citationRange(citation: { line_start?: number; line_end?: number }): string {
+  if (!citation.line_start && !citation.line_end) {
+    return ''
+  }
+  if (!citation.line_start || !citation.line_end) {
+    return `${citation.line_start || citation.line_end}`
+  }
+  if (citation.line_start === citation.line_end) {
+    return `${citation.line_start}`
+  }
+  return `${citation.line_start}-${citation.line_end}`
+}
+
+function attachEvidence(
+  values: string[],
+  evidenceRows: ScoreEvidenceRecord[],
+): Array<{ value: string; evidence?: ScoreEvidenceRecord }> {
+  const buckets = new Map<string, ScoreEvidenceRecord[]>()
+  for (const row of evidenceRows) {
+    const key = normalizeEvidenceValue(row.value || '')
+    if (!key) {
+      continue
+    }
+    const rows = buckets.get(key) || []
+    rows.push(row)
+    buckets.set(key, rows)
+  }
+
+  return values.map((value) => {
+    const key = normalizeEvidenceValue(value)
+    const rows = buckets.get(key)
+    if (rows && rows.length > 0) {
+      return { value, evidence: rows.shift() }
+    }
+    return { value }
+  })
+}
 
 export default function ScoreJD() {
   const [jd, setJd] = useState('')
@@ -163,6 +205,9 @@ function ResultPanel({
 }) {
   const score = Math.round(result.fit_score)
   const color = scoreColorHex(score)
+  const matchedKeywordRows = attachEvidence(result.matched_keywords, result.matched_keyword_evidence || [])
+  const missingKeywordRows = attachEvidence(result.missing_keywords, result.missing_keyword_evidence || [])
+  const rewriteSuggestionRows = attachEvidence(result.rewrite_suggestions, result.rewrite_suggestion_evidence || [])
 
   return (
     <div className="flex flex-col gap-4">
@@ -184,35 +229,127 @@ function ResultPanel({
       </div>
 
       {/* Matched keywords */}
-      {result.matched_keywords.length > 0 && (
+      {matchedKeywordRows.length > 0 && (
         <div className="card p-4">
           <div className="flex items-center gap-2 mb-3">
             <CheckCircle2 className="w-4 h-4 text-sage-500" />
             <span className="text-sm font-semibold text-text-primary">
-              Matched ({result.matched_keywords.length})
+              Matched ({matchedKeywordRows.length})
             </span>
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {result.matched_keywords.map((kw) => (
-              <span key={kw} className="keyword-matched">{kw}</span>
-            ))}
+          <div className="space-y-2">
+            {matchedKeywordRows.map((item, i) => {
+              const citations = item.evidence?.cv_citations || []
+              const phraseCitations = item.evidence?.jd_phrase_citations || []
+              const hasEvidence = citations.length > 0 || phraseCitations.length > 0
+
+              return (
+                <div key={`${item.value}-${i}`} className="p-2 rounded-lg border border-sage-100 bg-sage-50">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="keyword-matched">{item.value}</span>
+                    {hasEvidence && (
+                      <span className="text-[10px] text-sage-700">
+                        {citations.length > 0 ? `${citations.length} CV` : ''}
+                        {citations.length > 0 && phraseCitations.length > 0 ? ' · ' : ''}
+                        {phraseCitations.length > 0 ? `${phraseCitations.length} JD` : ''}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 space-y-1">
+                    {citations.map((citation, idx) => {
+                      const lines = citationRange(citation)
+                      return (
+                        <div key={`${item.value}-cv-${idx}`} className="text-xs text-text-secondary">
+                          <span className="font-semibold">CV:</span>{' '}
+                          {citation.section_id ? `section ${citation.section_id}` : 'CV evidence'}
+                          {lines ? ` (lines ${lines})` : ''}{' '}
+                          {citation.snippet ? `— ${citation.snippet}` : ''}
+                        </div>
+                      )
+                    })}
+                    {phraseCitations.map((citation, idx) => {
+                      const lines = citationRange(citation)
+                      return (
+                        <div key={`${item.value}-jd-${idx}`} className="text-xs text-text-secondary">
+                          <span className="font-semibold">JD:</span>{' '}
+                          {citation.phrase_id ? `phrase ${citation.phrase_id}` : 'JD evidence'}
+                          {lines ? ` (lines ${lines})` : ''}{' '}
+                          {citation.snippet ? `— ${citation.snippet}` : ''}
+                        </div>
+                      )
+                    })}
+                    {item.evidence?.evidence_missing_reason && !hasEvidence && (
+                      <p className="text-xs text-amber-700">
+                        {item.evidence.evidence_missing_reason}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
 
       {/* Missing keywords */}
-      {result.missing_keywords.length > 0 && (
+      {missingKeywordRows.length > 0 && (
         <div className="card p-4">
           <div className="flex items-center gap-2 mb-3">
             <XCircle className="w-4 h-4 text-red-400" />
             <span className="text-sm font-semibold text-text-primary">
-              Missing ({result.missing_keywords.length})
+              Missing ({missingKeywordRows.length})
             </span>
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {result.missing_keywords.map((kw) => (
-              <span key={kw} className="keyword-missing">{kw}</span>
-            ))}
+          <div className="space-y-2">
+            {missingKeywordRows.map((item, i) => {
+              const citations = item.evidence?.cv_citations || []
+              const phraseCitations = item.evidence?.jd_phrase_citations || []
+              const hasEvidence = citations.length > 0 || phraseCitations.length > 0
+
+              return (
+                <div key={`${item.value}-${i}`} className="p-2 rounded-lg border border-red-100 bg-red-50">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="keyword-missing">{item.value}</span>
+                    {hasEvidence && (
+                      <span className="text-[10px] text-red-700">
+                        {citations.length > 0 ? `${citations.length} CV` : ''}
+                        {citations.length > 0 && phraseCitations.length > 0 ? ' · ' : ''}
+                        {phraseCitations.length > 0 ? `${phraseCitations.length} JD` : ''}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 space-y-1">
+                    {citations.map((citation, idx) => {
+                      const lines = citationRange(citation)
+                      return (
+                        <div key={`${item.value}-cv-${idx}`} className="text-xs text-text-secondary">
+                          <span className="font-semibold">CV:</span>{' '}
+                          {citation.section_id ? `section ${citation.section_id}` : 'CV evidence'}
+                          {lines ? ` (lines ${lines})` : ''}{' '}
+                          {citation.snippet ? `— ${citation.snippet}` : ''}
+                        </div>
+                      )
+                    })}
+                    {phraseCitations.map((citation, idx) => {
+                      const lines = citationRange(citation)
+                      return (
+                        <div key={`${item.value}-jd-${idx}`} className="text-xs text-text-secondary">
+                          <span className="font-semibold">JD:</span>{' '}
+                          {citation.phrase_id ? `phrase ${citation.phrase_id}` : 'JD evidence'}
+                          {lines ? ` (lines ${lines})` : ''}{' '}
+                          {citation.snippet ? `— ${citation.snippet}` : ''}
+                        </div>
+                      )
+                    })}
+                    {item.evidence?.evidence_missing_reason && !hasEvidence && (
+                      <p className="text-xs text-amber-700">
+                        {item.evidence.evidence_missing_reason}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
@@ -225,6 +362,16 @@ function ResultPanel({
             <span className="text-sm font-semibold text-text-primary">Gap Analysis</span>
           </div>
           <p className="text-sm text-text-secondary leading-relaxed">{result.gap_analysis}</p>
+        </div>
+      )}
+
+      {result.reason && (
+        <div className="card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertCircle className="w-4 h-4 text-text-secondary" />
+            <span className="text-sm font-semibold text-text-primary">Why this score</span>
+          </div>
+          <p className="text-sm text-text-secondary leading-relaxed">{result.reason}</p>
         </div>
       )}
 
@@ -279,7 +426,7 @@ function ResultPanel({
       )}
 
       {/* Rewrite Suggestions */}
-      {result.rewrite_suggestions.length > 0 && (
+      {rewriteSuggestionRows.length > 0 && (
         <div className="card p-4">
           <button
             onClick={() => setSuggestionsOpen(!suggestionsOpen)}
@@ -288,7 +435,7 @@ function ResultPanel({
             <div className="flex items-center gap-2">
               <Lightbulb className="w-4 h-4 text-amber-500" />
               <span className="text-sm font-semibold text-text-primary">
-                Rewrite Suggestions ({result.rewrite_suggestions.length})
+                Rewrite Suggestions ({rewriteSuggestionRows.length})
               </span>
             </div>
             {suggestionsOpen ? (
@@ -298,13 +445,58 @@ function ResultPanel({
             )}
           </button>
           {suggestionsOpen && (
-            <ul className="mt-3 space-y-2">
-              {result.rewrite_suggestions.map((s, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-text-secondary">
-                  <span className="text-sage-500 font-semibold shrink-0">{i + 1}.</span>
-                  {s}
-                </li>
-              ))}
+            <ul className="mt-3 space-y-3">
+              {rewriteSuggestionRows.map((item, i) => {
+                const citations = item.evidence?.cv_citations || []
+                const phraseCitations = item.evidence?.jd_phrase_citations || []
+                const hasEvidence = citations.length > 0 || phraseCitations.length > 0
+
+                return (
+                  <li key={`${item.value}-${i}`} className="p-2 rounded-lg border border-amber-100 bg-amber-50">
+                    <div className="flex items-start gap-2">
+                      <span className="text-sage-500 font-semibold shrink-0 mt-0.5">{i + 1}.</span>
+                      <div>
+                        <p className="text-sm text-text-secondary leading-relaxed">{item.value}</p>
+                        {item.evidence?.evidence_missing_reason && !hasEvidence && (
+                          <p className="text-xs text-amber-700 mt-1">
+                            {item.evidence.evidence_missing_reason}
+                          </p>
+                        )}
+                        {citations.length > 0 && (
+                          <p className="text-xs text-text-secondary mt-1">
+                            CV: {citations.length} citation{citations.length > 1 ? 's' : ''}
+                          </p>
+                        )}
+                        {phraseCitations.length > 0 && (
+                          <p className="text-xs text-text-secondary">
+                            JD: {phraseCitations.length} citation{phraseCitations.length > 1 ? 's' : ''}
+                          </p>
+                        )}
+                        {citations.map((citation, index) => {
+                          const lines = citationRange(citation)
+                          return (
+                            <div key={`${item.value}-cv-${index}`} className="text-xs text-text-secondary">
+                              {citation.section_id ? `section ${citation.section_id}` : 'CV evidence'}
+                              {lines ? ` (lines ${lines})` : ''}{' '}
+                              {citation.snippet ? `— ${citation.snippet}` : ''}
+                            </div>
+                          )
+                        })}
+                        {phraseCitations.map((citation, index) => {
+                          const lines = citationRange(citation)
+                          return (
+                            <div key={`${item.value}-jd-${index}`} className="text-xs text-text-secondary">
+                              {citation.phrase_id ? `phrase ${citation.phrase_id}` : 'JD evidence'}
+                              {lines ? ` (lines ${lines})` : ''}{' '}
+                              {citation.snippet ? `— ${citation.snippet}` : ''}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </li>
+                )
+              })}
             </ul>
           )}
         </div>

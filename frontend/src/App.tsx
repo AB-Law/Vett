@@ -5,6 +5,7 @@ import MyCv from './pages/MyCv'
 import ScoreJD from './pages/ScoreJD'
 import Jobs from './pages/Jobs'
 import JobDetails from './pages/JobDetails'
+import InterviewPrep from './pages/InterviewPrep'
 import Settings from './pages/Settings'
 import SolvePractice from './pages/SolvePractice'
 
@@ -18,6 +19,8 @@ export default function App() {
         <Route path="score" element={<ScoreJD />} />
         <Route path="jobs" element={<Jobs />} />
         <Route path="jobs/:id" element={<JobDetails />} />
+        <Route path="jobs/:id/interview-prep" element={<InterviewPrep />} />
+        <Route path="jobs/:id/interview-prep/voice" element={<InterviewPrep />} />
         <Route path="practice/coach" element={<SolvePractice />} />
         <Route path="settings" element={<Settings />} />
       </Route>

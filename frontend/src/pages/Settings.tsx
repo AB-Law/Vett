@@ -1,9 +1,52 @@
-import { useEffect, useState } from 'react'
-import { Settings2, CheckCircle2, XCircle, Loader2, Trash2, Download, Database } from 'lucide-react'
-import { getSettings, updateSettings, testConnection, clearHistory, getEmbeddingProgress, type AppSettings } from '../lib/api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useDropzone } from 'react-dropzone'
+import { Settings2, CheckCircle2, XCircle, Loader2, Trash2, Download, Database, Upload, FileText } from 'lucide-react'
+import {
+  getSettings,
+  updateSettings,
+  testConnection,
+  clearHistory,
+  getEmbeddingProgress,
+  getInterviewDocumentProgress,
+  uploadInterviewDocument,
+  type AppSettings,
+  type InterviewKnowledgeDocument,
+  type InterviewKnowledgeDocumentProgress,
+  getUserProfile,
+  updateUserProfile,
+  type CandidateProfile,
+} from '../lib/api'
+import { TtsProviderRouter } from '../lib/voice/ttsProviderRouter'
 import toast from 'react-hot-toast'
 
 type Provider = 'claude' | 'openai' | 'azure_openai' | 'ollama' | 'lm_studio'
+type CandidateProfileForm = {
+  full_name: string
+  headline_or_target_role: string
+  current_company: string
+  years_experience: string
+  top_skills: string
+  location: string
+  linkedin_url: string
+  summary: string
+}
+type InterviewDocumentWithProgress = {
+  id: number
+  owner_type: 'global' | 'job'
+  job_id: number | null
+  source_filename: string
+  content_type: string
+  status: string
+  error_message: string | null
+  parser_version: string | null
+  source_ref: string | null
+  created_at: string
+  created_by_user_id: string | null
+  total_chunks: number
+  embedded_chunks: number
+  parsed_word_count: number
+  progress_percent: number
+}
 
 const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'claude', label: 'Claude' },
@@ -13,6 +56,8 @@ const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'lm_studio', label: 'LM Studio' },
 ]
 
+const VOICE_PREVIEW_TEXT = 'This is a preview of your interview voice settings.'
+
 export default function Settings() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [loading, setLoading] = useState(true)
@@ -20,14 +65,112 @@ export default function Settings() {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [embeddingProgress, setEmbeddingProgress] = useState<{ total: number; embedded: number; percent: number } | null>(null)
+  const [interviewDocuments, setInterviewDocuments] = useState<InterviewDocumentWithProgress[]>([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [uploadingDocument, setUploadingDocument] = useState(false)
+  const [candidateProfile, setCandidateProfile] = useState<CandidateProfileForm>({
+    full_name: '',
+    headline_or_target_role: '',
+    current_company: '',
+    years_experience: '',
+    top_skills: '',
+    location: '',
+    linkedin_url: '',
+    summary: '',
+  })
+  const [loadingCandidateProfile, setLoadingCandidateProfile] = useState(false)
+  const [savingCandidateProfile, setSavingCandidateProfile] = useState(false)
+  const [voicePreviewStatus, setVoicePreviewStatus] = useState('')
+  const [previewingVoice, setPreviewingVoice] = useState(false)
+  const documentsPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const previewRouterRef = useRef<TtsProviderRouter | null>(null)
+  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const previewAbortRef = useRef<AbortController | null>(null)
+  const skipInitialVoicePreviewRef = useRef(true)
+
+  const progressPercent = useCallback((embeddedChunks: number, totalChunks: number): number => {
+    if (totalChunks <= 0) return 0
+    const value = (embeddedChunks / totalChunks) * 100
+    if (!Number.isFinite(value)) return 0
+    return Math.round(value * 10) / 10
+  }, [])
+
+  const toDocumentWithProgress = useCallback(
+    (doc: InterviewKnowledgeDocument | InterviewKnowledgeDocumentProgress): InterviewDocumentWithProgress => ({
+      id: doc.id,
+      owner_type: doc.owner_type,
+      job_id: doc.job_id,
+      source_filename: doc.source_filename,
+      content_type: 'content_type' in doc ? doc.content_type : '',
+      status: doc.status,
+      error_message: doc.error_message,
+      parser_version: 'parser_version' in doc ? doc.parser_version : null,
+      source_ref: 'source_ref' in doc ? doc.source_ref : null,
+      created_at: doc.created_at,
+      created_by_user_id: doc.created_by_user_id,
+      total_chunks: doc.total_chunks,
+      embedded_chunks: doc.embedded_chunks,
+      parsed_word_count: doc.parsed_word_count,
+      progress_percent:
+        'progress_percent' in doc ? doc.progress_percent : progressPercent(doc.embedded_chunks, doc.total_chunks),
+    }),
+    [progressPercent],
+  )
+
+  const stopDocumentPolling = (): void => {
+    if (documentsPollRef.current) {
+      clearInterval(documentsPollRef.current)
+      documentsPollRef.current = null
+    }
+  }
+
+  const isDocumentInProgress = useCallback((status: string): boolean => {
+    const normalized = status.toLowerCase()
+    return normalized.includes('pending') || normalized.includes('processing')
+  }, [])
+
+  const refreshInterviewDocuments = useCallback(async () => {
+    try {
+      const [ep, docs] = await Promise.all([getEmbeddingProgress(), getInterviewDocumentProgress()])
+      setEmbeddingProgress(ep)
+      const mappedDocs = docs.map(toDocumentWithProgress)
+      setInterviewDocuments(mappedDocs)
+
+      const shouldKeepPolling = mappedDocs.some((doc) => isDocumentInProgress(doc.status)) || ep.percent < 100
+      if (!shouldKeepPolling) {
+        stopDocumentPolling()
+      }
+    } catch {
+      // Keep existing state and try again next interval if polling is still active.
+    }
+  }, [toDocumentWithProgress])
+
+  const ensureDocumentPolling = useCallback((): void => {
+    if (documentsPollRef.current) return
+    documentsPollRef.current = setInterval(() => {
+      void refreshInterviewDocuments()
+    }, 2000)
+  }, [refreshInterviewDocuments])
 
   // Pending changes
   const [activeProvider, setActiveProvider] = useState<Provider>('ollama')
   const [fields, setFields] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    Promise.all([getSettings(), getEmbeddingProgress()])
-      .then(([s, ep]) => {
+    setLoading(true)
+    setDocumentsLoading(true)
+    setLoadingCandidateProfile(true)
+    const load = async () => {
+      try {
+        const [s, ep, docs, profile] = await Promise.all([
+          getSettings(),
+          getEmbeddingProgress(),
+          getInterviewDocumentProgress(),
+          getUserProfile(),
+        ])
+        const mappedDocs = docs.map(toDocumentWithProgress)
+        const profileForm = toCandidateProfileForm(profile)
+
         setSettings(s)
         setActiveProvider(s.active_provider as Provider)
         setFields({
@@ -40,13 +183,161 @@ export default function Settings() {
           ollama_model: s.ollama_model,
           lm_studio_base_url: s.lm_studio_base_url,
           lm_studio_model: s.lm_studio_model,
+          tts_provider: s.tts_provider || 'kokoro',
+          voice_preferred_name: s.voice_preferred_name || '',
+          voice_rate: String(s.voice_rate ?? 1),
+          voice_pitch: String(s.voice_pitch ?? 1),
         })
         setEmbeddingProgress(ep)
-      })
-      .finally(() => setLoading(false))
+        setInterviewDocuments(mappedDocs)
+        setCandidateProfile(profileForm)
+        setLoadingCandidateProfile(false)
+        if (mappedDocs.some((doc) => isDocumentInProgress(doc.status)) || ep.percent < 100) {
+          ensureDocumentPolling()
+        }
+      } finally {
+        setLoading(false)
+        setDocumentsLoading(false)
+        setLoadingCandidateProfile(false)
+      }
+    }
+
+    void load()
+
+    return () => {
+      stopDocumentPolling()
+    }
+  }, [])
+
+  useEffect(() => {
+    previewRouterRef.current = new TtsProviderRouter({
+      onStatus: (event) => setVoicePreviewStatus(event.message),
+    })
+    return () => {
+      if (previewTimerRef.current) clearTimeout(previewTimerRef.current)
+      if (previewAbortRef.current) previewAbortRef.current.abort()
+      previewRouterRef.current?.dispose()
+      previewRouterRef.current = null
+    }
   }, [])
 
   const set = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }))
+  const setProfileField = useCallback((key: keyof CandidateProfileForm, value: string) => {
+    setCandidateProfile((previous) => ({ ...previous, [key]: value }))
+  }, [])
+
+  const playVoicePreview = useCallback(async (overrides?: Partial<Record<string, string>>) => {
+    const router = previewRouterRef.current
+    if (!router) return
+    const ttsProvider = (overrides?.tts_provider ?? fields.tts_provider ?? 'kokoro') as 'native' | 'kokoro'
+    const preferredVoiceName = overrides?.voice_preferred_name ?? fields.voice_preferred_name ?? ''
+    const rate = Number(overrides?.voice_rate ?? fields.voice_rate ?? '1')
+    const pitch = Number(overrides?.voice_pitch ?? fields.voice_pitch ?? '1')
+
+    router.setPreferredProvider(ttsProvider)
+    if (previewAbortRef.current) previewAbortRef.current.abort()
+    const controller = new AbortController()
+    previewAbortRef.current = controller
+    setPreviewingVoice(true)
+    setVoicePreviewStatus('Playing voice preview...')
+    try {
+      await router.speakChunk(VOICE_PREVIEW_TEXT, {
+        preferredVoiceName,
+        rate: Number.isFinite(rate) ? rate : 1,
+        pitch: Number.isFinite(pitch) ? pitch : 1,
+        kokoroSpeed: Number.isFinite(rate) ? rate : 1,
+        signal: controller.signal,
+      })
+      setVoicePreviewStatus('')
+    } catch (error: unknown) {
+      const isAbort = error instanceof DOMException && error.name === 'AbortError'
+      if (!isAbort) {
+        setVoicePreviewStatus('Voice preview unavailable')
+      }
+    } finally {
+      setPreviewingVoice(false)
+    }
+  }, [fields.tts_provider, fields.voice_pitch, fields.voice_preferred_name, fields.voice_rate])
+
+  const scheduleVoicePreview = useCallback((overrides?: Partial<Record<string, string>>) => {
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current)
+    previewTimerRef.current = setTimeout(() => {
+      void playVoicePreview(overrides)
+    }, 280)
+  }, [playVoicePreview])
+
+  useEffect(() => {
+    if (loading) return
+    if (skipInitialVoicePreviewRef.current) {
+      skipInitialVoicePreviewRef.current = false
+      return
+    }
+    scheduleVoicePreview()
+  }, [fields.tts_provider, fields.voice_preferred_name, fields.voice_rate, fields.voice_pitch, loading, scheduleVoicePreview])
+
+  const toCandidateProfileForm = useCallback((profile: CandidateProfile): CandidateProfileForm => ({
+    full_name: profile.full_name || '',
+    headline_or_target_role: profile.headline_or_target_role || '',
+    current_company: profile.current_company || '',
+    years_experience: profile.years_experience == null ? '' : String(profile.years_experience),
+    top_skills: profile.top_skills?.join(', ') || '',
+    location: profile.location || '',
+    linkedin_url: profile.linkedin_url || '',
+    summary: profile.summary || '',
+  }), [])
+
+  const statusClass = (status: string): string => {
+    const normalized = status.toLowerCase()
+    if (normalized.includes('embed')) {
+      return 'bg-sage-100 text-sage-700 border border-sage-200'
+    }
+    if (normalized.includes('processing')) {
+      return 'bg-amber-100 text-amber-700 border border-amber-200'
+    }
+    if (normalized.includes('failed')) {
+      return 'bg-red-100 text-red-700 border border-red-200'
+    }
+    return 'bg-gray-100 text-text-muted border border-border'
+  }
+
+  const handleInterviewDocsDrop = useCallback(
+    async (files: File[]) => {
+      const file = files[0]
+      if (!file) return
+      setUploadingDocument(true)
+      try {
+        const newDoc = await uploadInterviewDocument(file)
+        const normalizedDoc = toDocumentWithProgress(newDoc)
+        setInterviewDocuments((current) => [normalizedDoc, ...current.filter((doc) => doc.id !== normalizedDoc.id)])
+        ensureDocumentPolling()
+        await refreshInterviewDocuments()
+        toast.success('Interview document uploaded')
+      } catch (err: unknown) {
+        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Upload failed'
+        toast.error(detail)
+      } finally {
+        setUploadingDocument(false)
+      }
+    },
+    [ensureDocumentPolling, refreshInterviewDocuments, toDocumentWithProgress],
+  )
+
+  const {
+    getRootProps: getInterviewDocsRootProps,
+    getInputProps: getInterviewDocsInputProps,
+    isDragActive: isInterviewDocsDragActive,
+  } = useDropzone({
+    onDrop: handleInterviewDocsDrop,
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/msword': ['.doc'],
+      'text/markdown': ['.md', '.markdown'],
+      'text/plain': ['.txt'],
+    },
+    maxFiles: 1,
+    disabled: uploadingDocument,
+  })
 
   const handleSave = async () => {
     setSaving(true)
@@ -58,6 +349,33 @@ export default function Settings() {
       toast.error('Failed to save settings')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSaveProfile = async () => {
+    setSavingCandidateProfile(true)
+    try {
+      const yearsText = candidateProfile.years_experience.trim()
+      const yearsNumber = yearsText === '' ? null : Number(yearsText)
+      const payload = {
+        full_name: candidateProfile.full_name.trim(),
+        headline_or_target_role: candidateProfile.headline_or_target_role.trim(),
+        current_company: candidateProfile.current_company.trim(),
+        years_experience: Number.isNaN(yearsNumber) ? null : yearsNumber,
+        top_skills: candidateProfile.top_skills
+          .split(',')
+          .map((skill) => skill.trim())
+          .filter((skill) => skill),
+        location: candidateProfile.location.trim(),
+        linkedin_url: candidateProfile.linkedin_url.trim(),
+        summary: candidateProfile.summary.trim(),
+      }
+      await updateUserProfile(payload)
+      toast.success('Candidate profile saved')
+    } catch {
+      toast.error('Failed to save candidate profile')
+    } finally {
+      setSavingCandidateProfile(false)
     }
   }
 
@@ -248,6 +566,121 @@ export default function Settings() {
             <option value="pdf">PDF</option>
           </select>
         </div>
+        <div className="border-t border-border pt-3 mt-3">
+          <label className="label">Voice provider</label>
+          <select
+            className="input max-w-xs"
+            value={fields.tts_provider || 'kokoro'}
+            onChange={(e) => set('tts_provider', e.target.value)}
+          >
+            <option value="kokoro">Kokoro (local, recommended)</option>
+            <option value="native">Browser native voice</option>
+          </select>
+          <p className="text-[11px] text-text-muted mt-1">
+            Kokoro runs fully local in your browser. If unsupported, advanced voice auto-falls back to native speech.
+          </p>
+        </div>
+        <div className="border-t border-border pt-3 mt-3">
+          <label className="label">Preferred voice name (optional)</label>
+          <input
+            className="input max-w-md"
+            value={fields.voice_preferred_name || ''}
+            onChange={(e) => set('voice_preferred_name', e.target.value)}
+            placeholder="e.g. Samantha, Alex, Google US English"
+          />
+          <p className="text-[11px] text-text-muted mt-1">
+            Used by browser-native voice mode (and fallback mode) to pick the closest available system voice.
+          </p>
+        </div>
+        <div className="border-t border-border pt-3 mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="label">Voice rate ({Number(fields.voice_rate || 1).toFixed(1)}x)</label>
+            <input
+              type="range"
+              min="0.7"
+              max="1.3"
+              step="0.1"
+              className="w-full"
+              value={fields.voice_rate || '1'}
+              onChange={(e) => set('voice_rate', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="label">Voice pitch ({Number(fields.voice_pitch || 1).toFixed(1)})</label>
+            <input
+              type="range"
+              min="0.8"
+              max="1.2"
+              step="0.1"
+              className="w-full"
+              value={fields.voice_pitch || '1'}
+              onChange={(e) => set('voice_pitch', e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="border-t border-border pt-3 mt-3 flex items-center justify-between gap-3">
+          <p className="text-[11px] text-text-muted">
+            {voicePreviewStatus || 'Change provider, voice, rate, or pitch to hear a voice preview.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => void playVoicePreview()}
+            className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-60"
+            disabled={previewingVoice}
+          >
+            {previewingVoice ? <Loader2 className="inline w-3 h-3 mr-1 animate-spin" /> : null}
+            Preview voice
+          </button>
+        </div>
+      </div>
+
+      {/* Candidate Profile */}
+      <div className="card p-5 mb-5">
+        <div className="flex items-center gap-2 mb-4">
+          <CheckCircle2 className="w-4 h-4 text-text-secondary" />
+          <h2 className="section-title">Candidate Profile</h2>
+        </div>
+        <div className="space-y-3">
+          <Field label="Full Name" value={candidateProfile.full_name} onChange={(v) => setProfileField('full_name', v)}
+            placeholder="Your full name" />
+          <Field label="Headline / Target Role" value={candidateProfile.headline_or_target_role}
+            onChange={(v) => setProfileField('headline_or_target_role', v)}
+            placeholder="e.g. Senior Backend Engineer" />
+          <Field label="Current Company" value={candidateProfile.current_company}
+            onChange={(v) => setProfileField('current_company', v)}
+            placeholder="Current or last company" />
+          <Field label="Years of Experience" value={candidateProfile.years_experience}
+            onChange={(v) => setProfileField('years_experience', v)}
+            placeholder="e.g. 4" />
+          <Field label="Top Skills" value={candidateProfile.top_skills} onChange={(v) => setProfileField('top_skills', v)}
+            placeholder="Python, FastAPI, PostgreSQL" />
+          <Field label="Location" value={candidateProfile.location}
+            onChange={(v) => setProfileField('location', v)}
+            placeholder="City, Country" />
+          <Field label="LinkedIn URL" value={candidateProfile.linkedin_url}
+            onChange={(v) => setProfileField('linkedin_url', v)}
+            placeholder="https://www.linkedin.com/in/your-profile" />
+          <div>
+            <label className="label">Summary</label>
+            <textarea
+              className="input min-h-24"
+              value={candidateProfile.summary}
+              onChange={(e) => setProfileField('summary', e.target.value)}
+              placeholder="Brief profile summary"
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end mt-4">
+          <button
+            onClick={handleSaveProfile}
+            disabled={savingCandidateProfile || loadingCandidateProfile}
+            className="btn-secondary flex items-center gap-2"
+          >
+            {savingCandidateProfile ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+            Save Candidate Profile
+          </button>
+        </div>
       </div>
 
       {/* Practice Embeddings */}
@@ -268,10 +701,68 @@ export default function Settings() {
             />
           </div>
           {embeddingProgress.percent < 100 && (
-            <p className="text-xs text-text-muted mt-2">Embeddings are being generated in the background. Refresh to check progress.</p>
+            <p className="text-xs text-text-muted mt-2">Embedding is in progress and updates automatically.</p>
           )}
         </div>
       )}
+
+      {/* Interview Documents */}
+      <div className="card p-5 mb-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Upload className="w-4 h-4 text-text-secondary" />
+          <h2 className="section-title">Interview Documents</h2>
+        </div>
+
+        <div
+          {...getInterviewDocsRootProps()}
+          className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
+            isInterviewDocsDragActive
+              ? 'border-sage-400 bg-sage-50'
+              : 'border-border hover:border-sage-300 hover:bg-gray-50'
+          } ${uploadingDocument ? 'opacity-60 pointer-events-none' : ''}`}
+        >
+          <input {...getInterviewDocsInputProps()} />
+          <FileText className="w-7 h-7 text-text-muted mx-auto mb-2" />
+          <p className="text-sm font-medium text-text-secondary mb-1">
+            {isInterviewDocsDragActive ? 'Drop interview docs here…' : 'Drop or upload PDF / DOCX / DOC / MD / TXT'}
+          </p>
+          <p className="text-xs text-text-muted">These documents are used as interview knowledge base references.</p>
+          {uploadingDocument && <p className="text-xs text-sage-600 mt-2 font-medium">Uploading…</p>}
+        </div>
+
+        <div className="mt-4">
+          {documentsLoading ? (
+            <p className="text-xs text-text-muted">Loading interview documents…</p>
+          ) : interviewDocuments.length === 0 ? (
+            <p className="text-xs text-text-muted">No interview documents uploaded yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {interviewDocuments.map((doc) => (
+                <div key={doc.id} className="border border-border rounded p-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <div className="text-text-primary font-medium truncate">{doc.source_filename}</div>
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] ${statusClass(doc.status)}`}>
+                      {doc.status}
+                    </span>
+                  </div>
+                  {doc.error_message && <p className="text-[11px] text-red-600 mt-1">{doc.error_message}</p>}
+                  <div className="mt-2">
+                    <div className="w-full bg-gray-100 rounded-full h-2">
+                      <div
+                        className="bg-sage-500 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${Math.min(100, Math.max(0, doc.progress_percent))}%` }}
+                      />
+                    </div>
+                    <p className="text-[11px] text-text-muted mt-1">
+                      {doc.total_chunks > 0 ? `${doc.embedded_chunks} / ${doc.total_chunks} chunks` : 'No chunks yet'} ({doc.progress_percent.toFixed(1)}%)
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Data & Storage */}
       <div className="card p-5 mb-8">

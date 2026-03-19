@@ -54,6 +54,19 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
+  searxng:
+    image: searxng/searxng:latest
+    expose:
+      - "8080"
+    depends_on:
+      - backend
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080
+      - SEARXNG_SECRET=changeme-dev-secret
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     ports:

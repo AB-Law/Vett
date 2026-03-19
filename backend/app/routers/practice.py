@@ -301,7 +301,7 @@ def list_company_questions(
                 difficulty=q.difficulty,
                 acceptance=q.acceptance,
                 frequency=q.frequency,
-                source_file=q.source_file,
+                source_file=getattr(q, "source_file", q.source_window),
                 source_window=q.source_window,
                 is_ai_generated=session_question_rows.get(q.id) == "ai-generated",
                 is_solved=session_question_rows.get(q.id) == "solved",
@@ -578,7 +578,7 @@ async def next_follow_up(payload: PracticeNextRequest, db: Session = Depends(get
                 difficulty=generated_question.difficulty,
                 acceptance=generated_question.acceptance,
                 frequency=generated_question.frequency,
-                source_file=generated_question.source_file,
+                source_file=getattr(generated_question, "source_file", generated_question.source_window),
                 source_window=generated_question.source_window,
                 prompt=transformed_prompt,
                 is_ai_generated=True,
@@ -659,7 +659,7 @@ async def next_follow_up(payload: PracticeNextRequest, db: Session = Depends(get
             difficulty=generated_question.difficulty,
             acceptance=generated_question.acceptance,
             frequency=generated_question.frequency,
-            source_file=generated_question.source_file,
+                source_file=getattr(generated_question, "source_file", generated_question.source_window),
             source_window=generated_question.source_window,
             prompt=str(llm_result.get("transformed_prompt", "")) or None,
             is_ai_generated=True,
@@ -699,6 +699,8 @@ async def interview_chat(payload: PracticeInterviewChatRequest, db: Session = De
         message=message,
         conversation=history,
         solution_text=payload.solution_text,
+        db=db,
+        job_id=session.job_id,
     )
 
     return PracticeInterviewChatResponse(session_id=session.session_id, question_id=question.id, interviewer_reply=reply)

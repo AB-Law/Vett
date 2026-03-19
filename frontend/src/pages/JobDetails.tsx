@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react'
-import { ArrowLeft, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { useDropzone } from 'react-dropzone'
+import { ArrowLeft, AlertCircle, BookOpen, CheckCircle2, ExternalLink, Loader2, MessageCircle, XCircle, Upload, FileText } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import {
   getJob,
   type Job,
+  analyzeJob,
+  type JobAnalysisResult,
   getPracticeQuestions,
   type PracticeQuestion,
   markPracticeQuestionSolved,
@@ -12,6 +15,9 @@ import {
   getPracticeNextQuestion,
   discardPracticeQuestion,
   askPracticeInterviewer,
+  getJobInterviewDocuments,
+  uploadJobInterviewDocument,
+  type InterviewKnowledgeDocument,
 } from '../lib/api'
 import { formatDate, scoreColor } from '../lib/utils'
 import toast from 'react-hot-toast'
@@ -23,6 +29,56 @@ type ConstraintSettings = {
   complexity: string
   timePressureMinutes: string
   pattern: string
+}
+
+function CitationList({ citations, kind }: { citations: Array<{ section_id?: string; phrase_id?: string; line_start?: number; line_end?: number; snippet?: string }>; kind: 'cv' | 'jd' }) {
+  if (!citations || citations.length === 0) return null
+  return (
+    <div className="mt-1 space-y-1">
+      {citations.map((c, i) => (
+        <div key={i} className="rounded bg-surface-secondary border border-border px-2 py-1 text-[11px]">
+          <span className="font-medium text-text-secondary mr-1">
+            {kind === 'cv' ? `CV §${c.section_id || i + 1}` : `JD #${c.phrase_id || i + 1}`}
+          </span>
+          {(c.line_start || c.line_end) && (
+            <span className="text-text-muted mr-1">L{c.line_start}{c.line_end && c.line_end !== c.line_start ? `–${c.line_end}` : ''}</span>
+          )}
+          {c.snippet && <span className="italic text-text-primary">"{c.snippet}"</span>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function EvidenceBlock({ records, label }: { records: Array<{ value: string; cv_citations: any[]; jd_phrase_citations: any[]; evidence_missing_reason?: string }>; label: string }) {
+  if (!records || records.length === 0) return null
+  return (
+    <div className="mb-4">
+      <div className="text-xs font-semibold text-text-primary mb-2">{label}</div>
+      <div className="space-y-2">
+        {records.map((rec, i) => (
+          <div key={i} className="border border-border rounded p-2">
+            <div className="text-xs font-medium text-text-primary mb-1">"{rec.value}"</div>
+            {rec.cv_citations?.length > 0 && (
+              <div>
+                <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">CV evidence</div>
+                <CitationList citations={rec.cv_citations} kind="cv" />
+              </div>
+            )}
+            {rec.jd_phrase_citations?.length > 0 && (
+              <div className="mt-1">
+                <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">JD evidence</div>
+                <CitationList citations={rec.jd_phrase_citations} kind="jd" />
+              </div>
+            )}
+            {rec.evidence_missing_reason && (
+              <div className="text-[11px] text-amber-600 mt-1 italic">{rec.evidence_missing_reason}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 const difficultyTagClass = (difficulty: string): string => {
@@ -69,13 +125,19 @@ export default function JobDetails() {
   const [questionWindow, setQuestionWindow] = useState<'all' | 'older-than-six-months' | 'six-months' | 'three-months' | 'thirty-days'>(
     'all',
   )
-
+  const [interviewDocuments, setInterviewDocuments] = useState<InterviewKnowledgeDocument[]>([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [uploadingDocument, setUploadingDocument] = useState(false)
   const getQuestionSourceWindow = (windowFilter: typeof questionWindow): string => {
     if (windowFilter === 'older-than-six-months') {
       return 'one-year'
     }
     return windowFilter
   }
+  const [analysisResult, setAnalysisResult] = useState<JobAnalysisResult | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analysisError, setAnalysisError] = useState('')
+
   const [constraints, setConstraints] = useState<ConstraintSettings>({
     difficultyDelta: 'same',
     language: '',
@@ -292,6 +354,24 @@ export default function JobDetails() {
     }
   }
 
+  const handleAnalyze = async (): Promise<void> => {
+    if (!job) return
+    setAnalyzing(true)
+    setAnalysisError('')
+    setAnalysisResult(null)
+    try {
+      const result = await analyzeJob(job.id)
+      setAnalysisResult(result)
+      // Refresh job to pick up updated fit_score etc
+      const updated = await getJob(job.id)
+      setJob(updated)
+    } catch {
+      setAnalysisError('Deep analysis failed. Please try again.')
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
   const updateConstraint = (key: keyof ConstraintSettings, value: string): void => {
     setConstraints((current) => ({ ...current, [key]: value }))
   }
@@ -312,6 +392,88 @@ export default function JobDetails() {
       toast.error(msg, { position: 'top-right' })
     }
   }
+
+  const documentStatusClass = (status: string): string => {
+    const normalized = status.toLowerCase()
+    if (normalized.includes('embed')) {
+      return 'bg-sage-100 text-sage-700 border border-sage-200'
+    }
+    if (normalized.includes('processing')) {
+      return 'bg-amber-100 text-amber-700 border border-amber-200'
+    }
+    if (normalized.includes('failed')) {
+      return 'bg-red-100 text-red-700 border border-red-200'
+    }
+    return 'bg-gray-100 text-text-muted border border-border'
+  }
+
+  const handleInterviewDocsDrop = useCallback(
+    async (files: File[]) => {
+      const file = files[0]
+      if (!file || !job?.id) return
+      setUploadingDocument(true)
+      try {
+        const newDoc = await uploadJobInterviewDocument(job.id, file)
+        setInterviewDocuments((current) => [newDoc, ...current])
+        toast.success('Interview document uploaded')
+      } catch (err: unknown) {
+        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Upload failed'
+        toast.error(detail)
+      } finally {
+        setUploadingDocument(false)
+      }
+    },
+    [job?.id],
+  )
+
+  const {
+    getRootProps: getInterviewDocsRootProps,
+    getInputProps: getInterviewDocsInputProps,
+    isDragActive: isInterviewDocsDragActive,
+  } = useDropzone({
+    onDrop: handleInterviewDocsDrop,
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/msword': ['.doc'],
+      'text/markdown': ['.md', '.markdown'],
+      'text/plain': ['.txt'],
+    },
+    maxFiles: 1,
+    disabled: uploadingDocument,
+  })
+
+  useEffect(() => {
+    if (!job?.id) {
+      setInterviewDocuments([])
+      return
+    }
+
+    let cancelled = false
+
+    const fetchDocuments = async () => {
+      setDocumentsLoading(true)
+      try {
+        const docs = await getJobInterviewDocuments(job.id)
+        if (!cancelled) {
+          setInterviewDocuments(docs)
+        }
+      } catch {
+        if (!cancelled) {
+          setInterviewDocuments([])
+        }
+      } finally {
+        if (!cancelled) {
+          setDocumentsLoading(false)
+        }
+      }
+    }
+
+    void fetchDocuments()
+    return () => {
+      cancelled = true
+    }
+  }, [job?.id])
 
   if (loading) {
     return (
@@ -394,6 +556,192 @@ export default function JobDetails() {
               <span className="text-xs font-semibold text-text-primary">Gap Analysis</span>
             </div>
             <p className="text-xs text-text-secondary leading-relaxed">{job.gap_analysis}</p>
+          </div>
+        )}
+
+        {job.reason && (
+          <div className="mb-3">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <AlertCircle className="w-3.5 h-3.5 text-text-secondary" />
+              <span className="text-xs font-semibold text-text-primary">Why this score</span>
+            </div>
+            <p className="text-xs text-text-secondary leading-relaxed">{job.reason}</p>
+          </div>
+        )}
+
+        <div className="card p-4 mb-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Upload className="w-3.5 h-3.5 text-text-secondary" />
+            <span className="text-xs font-semibold text-text-primary">Interview Documents</span>
+          </div>
+          <div
+            {...getInterviewDocsRootProps()}
+            className={`border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors ${
+              isInterviewDocsDragActive ? 'border-sage-400 bg-sage-50' : 'border-border hover:border-sage-300 hover:bg-gray-50'
+            } ${uploadingDocument ? 'opacity-60 pointer-events-none' : ''}`}
+          >
+            <input {...getInterviewDocsInputProps()} />
+            <FileText className="w-6 h-6 text-text-muted mx-auto mb-2" />
+            <p className="text-xs font-medium text-text-secondary mb-1">
+              {isInterviewDocsDragActive ? 'Drop interview docs here…' : 'Drop or upload PDF / DOCX / DOC / MD / TXT'}
+            </p>
+            <p className="text-[11px] text-text-muted">These documents are used as job-level interview context.</p>
+            {uploadingDocument && <p className="text-xs text-sage-600 mt-2 font-medium">Uploading…</p>}
+          </div>
+          <div className="mt-3">
+            {documentsLoading ? (
+              <p className="text-xs text-text-muted">Loading interview documents…</p>
+            ) : interviewDocuments.length === 0 ? (
+              <p className="text-xs text-text-muted">No job-specific interview documents uploaded yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {interviewDocuments.map((doc) => (
+                  <div key={doc.id} className="border border-border rounded p-2">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="text-text-primary font-medium truncate">{doc.source_filename}</div>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] ${documentStatusClass(doc.status)}`}>
+                        {doc.status}
+                      </span>
+                    </div>
+                    {doc.error_message && <p className="text-[11px] text-red-600 mt-1">{doc.error_message}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Deep analysis trigger */}
+        <div className="mt-3 pt-3 border-t border-border">
+          <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              {job?.id ? (
+                <Link
+                  to={`/jobs/${job.id}/interview-prep`}
+                  className="rounded border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 px-3 py-1.5 text-xs"
+                >
+                  Start Interview Prep
+                </Link>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 pt-3 border-t border-border">
+          {!analysisResult && (
+            <button
+              type="button"
+              onClick={() => void handleAnalyze()}
+              disabled={analyzing}
+              className="btn-primary flex items-center gap-2 text-xs py-1.5 px-3 disabled:opacity-60"
+            >
+              {analyzing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+              {analyzing ? 'Running deep analysis…' : 'Run deep analysis'}
+            </button>
+          )}
+          {analyzing && (
+            <p className="text-xs text-text-muted mt-2">This may take 30–60 seconds. Role analysis → scoring → action plan.</p>
+          )}
+          {analysisError && (
+            <p className="text-xs text-red-500 mt-2">{analysisError}</p>
+          )}
+        </div>
+
+        {/* Deep analysis results */}
+        {analysisResult && (
+          <div className="mt-4 pt-3 border-t border-border space-y-4">
+            <div className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
+              <BookOpen className="w-3.5 h-3.5" />
+              Deep analysis results
+              <button
+                type="button"
+                onClick={() => void handleAnalyze()}
+                disabled={analyzing}
+                className="ml-auto text-[10px] text-text-muted hover:text-text-primary disabled:opacity-50"
+              >
+                {analyzing ? 'Re-running…' : 'Re-run'}
+              </button>
+            </div>
+
+            {/* Rewrite suggestions */}
+            {analysisResult.rewrite_suggestions?.length > 0 && (
+              <div>
+                <div className="text-xs font-semibold text-text-primary mb-1.5">Rewrite suggestions</div>
+                <ul className="space-y-1">
+                  {analysisResult.rewrite_suggestions.map((s, i) => (
+                    <li key={i} className="text-xs text-text-secondary flex gap-2">
+                      <span className="text-text-muted shrink-0">{i + 1}.</span>
+                      {s}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Agent plan */}
+            {analysisResult.agent_plan && (
+              <div>
+                <div className="text-xs font-semibold text-text-primary mb-1.5">Action plan</div>
+                {analysisResult.agent_plan.skills_to_fix_first?.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Skills to fix first</div>
+                    <div className="flex flex-wrap gap-1">
+                      {analysisResult.agent_plan.skills_to_fix_first.map((s: string, i: number) => (
+                        <span key={i} className="keyword-missing text-xs">{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {analysisResult.agent_plan.concrete_edit_actions?.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">CV edits</div>
+                    <ul className="space-y-1">
+                      {analysisResult.agent_plan.concrete_edit_actions.map((a: string, i: number) => (
+                        <li key={i} className="text-xs text-text-secondary flex gap-2">
+                          <span className="text-text-muted shrink-0">{i + 1}.</span>{a}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {analysisResult.agent_plan.interview_topics_to_prioritize?.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Interview topics</div>
+                    <div className="flex flex-wrap gap-1">
+                      {analysisResult.agent_plan.interview_topics_to_prioritize.map((t: string, i: number) => (
+                        <span key={i} className="keyword-matched text-xs">{t}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {analysisResult.agent_plan.study_order?.length > 0 && (
+                  <div>
+                    <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Study order</div>
+                    <ol className="space-y-0.5">
+                      {analysisResult.agent_plan.study_order.map((s: string, i: number) => (
+                        <li key={i} className="text-xs text-text-secondary flex gap-2">
+                          <span className="text-text-muted shrink-0 font-medium">{i + 1}.</span>{s}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Evidence sections */}
+            <EvidenceBlock
+              records={analysisResult.matched_keyword_evidence}
+              label="Matched keyword evidence"
+            />
+            <EvidenceBlock
+              records={analysisResult.missing_keyword_evidence}
+              label="Missing keyword evidence"
+            />
+            <EvidenceBlock
+              records={analysisResult.rewrite_suggestion_evidence}
+              label="Rewrite suggestion evidence"
+            />
           </div>
         )}
 

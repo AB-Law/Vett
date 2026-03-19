@@ -51,6 +51,10 @@ export interface ScoreResult {
   missing_keywords: string[]
   gap_analysis: string
   rewrite_suggestions: string[]
+  matched_keyword_evidence: ScoreEvidenceRecord[]
+  missing_keyword_evidence: ScoreEvidenceRecord[]
+  rewrite_suggestion_evidence: ScoreEvidenceRecord[]
+  reason?: string
   agent_plan?: ScoreAgentPlan
   job_title?: string
   company?: string
@@ -105,6 +109,21 @@ export interface ScoreRunArtifact {
   created_at: string
   transition_id: number | null
   score_history_id: number | null
+}
+
+export interface EvidenceCitation {
+  section_id?: string
+  phrase_id?: string
+  line_start?: number
+  line_end?: number
+  snippet?: string
+}
+
+export interface ScoreEvidenceRecord {
+  value: string
+  cv_citations: EvidenceCitation[]
+  jd_phrase_citations: EvidenceCitation[]
+  evidence_missing_reason?: string
 }
 
 export interface ScoreAgentPlan {
@@ -185,9 +204,70 @@ export interface AppSettings {
   lm_studio_model: string
   save_history: boolean
   default_export_format: string
+  tts_provider: 'native' | 'kokoro'
+  voice_preferred_name: string
+  voice_rate: number
+  voice_pitch: number
   has_anthropic_key: boolean
   has_openai_key: boolean
   has_azure_key: boolean
+}
+
+export interface CandidateProfile {
+  id: number | null
+  full_name: string
+  headline_or_target_role: string
+  current_company: string
+  years_experience: number | null
+  top_skills: string[]
+  location: string
+  linkedin_url: string
+  summary: string
+  source: string
+}
+
+export interface CandidateProfileUpdate {
+  full_name?: string
+  headline_or_target_role?: string
+  current_company?: string
+  years_experience?: number | null
+  top_skills?: string[]
+  location?: string
+  linkedin_url?: string
+  summary?: string
+  source?: string
+}
+
+export interface InterviewKnowledgeDocument {
+  id: number
+  owner_type: 'global' | 'job'
+  job_id: number | null
+  source_filename: string
+  content_type: string
+  status: string
+  error_message: string | null
+  parser_version: string | null
+  source_ref: string | null
+  created_at: string
+  created_by_user_id: string | null
+  total_chunks: number
+  embedded_chunks: number
+  parsed_word_count: number
+}
+
+export interface InterviewKnowledgeDocumentProgress {
+  id: number
+  owner_type: 'global' | 'job'
+  job_id: number | null
+  source_filename: string
+  status: string
+  total_chunks: number
+  embedded_chunks: number
+  progress_percent: number
+  error_message: string | null
+  parsed_word_count: number
+  created_at: string
+  created_by_user_id: string | null
 }
 
 export const getSettings = async (): Promise<AppSettings> => {
@@ -199,6 +279,16 @@ export const updateSettings = async (settings: Partial<AppSettings> & { [k: stri
   await api.post('/settings/', settings)
 }
 
+export const getUserProfile = async (): Promise<CandidateProfile> => {
+  const { data } = await api.get<CandidateProfile>('/profile/')
+  return data
+}
+
+export const updateUserProfile = async (payload: CandidateProfileUpdate): Promise<CandidateProfile> => {
+  const { data } = await api.post<CandidateProfile>('/profile/', payload)
+  return data
+}
+
 export const testConnection = async (): Promise<{ ok: boolean; reply?: string; error?: string }> => {
   const { data } = await api.post('/settings/test-connection')
   return data
@@ -207,6 +297,278 @@ export const testConnection = async (): Promise<{ ok: boolean; reply?: string; e
 export const getEmbeddingProgress = async (): Promise<{ total: number; embedded: number; percent: number }> => {
   const { data } = await api.get('/settings/embedding-progress')
   return data
+}
+
+export const getInterviewDocuments = async (): Promise<InterviewKnowledgeDocument[]> => {
+  const { data } = await api.get<InterviewKnowledgeDocument[]>('/settings/interview-documents')
+  return data
+}
+
+export const getInterviewDocumentProgress = async (): Promise<InterviewKnowledgeDocumentProgress[]> => {
+  const { data } = await api.get<InterviewKnowledgeDocumentProgress[]>('/settings/interview-documents/progress')
+  return data
+}
+
+export const uploadInterviewDocument = async (file: File): Promise<InterviewKnowledgeDocument> => {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await api.post<InterviewKnowledgeDocument>('/settings/interview-documents', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export const getJobInterviewDocuments = async (jobId: number): Promise<InterviewKnowledgeDocument[]> => {
+  const { data } = await api.get<InterviewKnowledgeDocument[]>(`/jobs/${jobId}/interview-documents`)
+  return data
+}
+
+export const uploadJobInterviewDocument = async (jobId: number, file: File): Promise<InterviewKnowledgeDocument> => {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await api.post<InterviewKnowledgeDocument>(`/jobs/${jobId}/interview-documents`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export const getInterviewResearchSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<InterviewResearchSession> => {
+  const { data } = await api.get<InterviewResearchSession>(`/jobs/${jobId}/interview-research/session/${sessionId}`)
+  return data
+}
+
+export const cancelInterviewResearchSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<{ status: string; job_id: number; session_id: string }> => {
+  const { data } = await api.post<{ status: string; job_id: number; session_id: string }>(
+    `/jobs/${jobId}/interview-research/session/${sessionId}/cancel`,
+  )
+  return data
+}
+
+export const buildInterviewResearchStreamUrl = (jobId: number): string =>
+  `/api/jobs/${jobId}/interview-research/stream`
+
+export interface InterviewChatToolCall {
+  tool: string
+  status: string
+  result_count: number
+  error?: string
+}
+
+export interface InterviewChatTurn {
+  id: number
+  turn_index: number
+  speaker: 'assistant' | 'user'
+  turn_type: 'question' | 'answer' | 'follow_up' | 'transition'
+  content: string
+  tool_calls: InterviewChatToolCall[]
+  context_sources: string[]
+  created_at: string
+}
+
+export interface InterviewChatSession {
+  session_id: string
+  label: string
+  status: string
+  phase: string
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  turn_count: number
+  handoff_run_id: string | null
+  preparation_status?: string | null
+  rolling_score?: number | null
+  limits?: {
+    min_questions: number
+    target_questions: number
+    max_questions: number
+  } | null
+  primary_question_count?: number
+}
+
+export interface InterviewChatSessionDetail extends InterviewChatSession {
+  job_id: number
+  feedback?: InterviewChatFeedback | null
+  thread_score_snapshot?: {
+    score?: number
+    rolling_score?: number
+    category?: string
+    question?: string
+  } | null
+  turns: InterviewChatTurn[]
+}
+
+export interface InterviewChatFeedback {
+  overview: string
+  what_went_well: string[]
+  what_to_improve: string[]
+  next_steps: string[]
+}
+
+export const listInterviewChatSessions = async (jobId: number): Promise<InterviewChatSession[]> => {
+  const { data } = await api.get<InterviewChatSession[]>(`/interview-chat/jobs/${jobId}/sessions`)
+  return data
+}
+
+export const createOrResumeInterviewChatSession = async (jobId: number): Promise<InterviewChatSessionDetail> => {
+  const { data } = await api.post<{ session: InterviewChatSessionDetail }>(`/interview-chat/jobs/${jobId}/sessions`)
+  return data.session
+}
+
+export const getInterviewChatSession = async (jobId: number, sessionId: string): Promise<InterviewChatSessionDetail> => {
+  const { data } = await api.get<InterviewChatSessionDetail>(`/interview-chat/jobs/${jobId}/sessions/${sessionId}`)
+  return data
+}
+
+export type InterviewChatStreamResult = {
+  message: string
+  phase: string
+  turn_types: string[]
+  tool_calls: InterviewChatToolCall[]
+  context_sources: string[]
+  preparation_status?: string
+  rolling_score?: number | null
+  thread_score_snapshot?: Record<string, unknown> | null
+  primary_question_count?: number
+  limits?: {
+    min_questions: number
+    target_questions: number
+    max_questions: number
+  } | null
+}
+
+export const streamInterviewChatTurn = async (
+  jobId: number,
+  sessionId: string,
+  message: string | null,
+  onToken: (token: string) => void,
+  options?: { signal?: AbortSignal },
+): Promise<InterviewChatStreamResult> => {
+  const response = await fetch(`/api/interview-chat/jobs/${jobId}/sessions/${sessionId}/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+    signal: options?.signal,
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`Interview stream failed (${response.status})`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let donePayload: InterviewChatStreamResult | null = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() ?? ''
+    for (const block of blocks) {
+      if (!block.startsWith('data: ')) continue
+      const payload = JSON.parse(block.slice(6)) as {
+        type?: string
+        delta?: string
+        message?: string
+        phase?: string
+        turn_types?: string[]
+        tool_calls?: InterviewChatToolCall[]
+        context_sources?: string[]
+        preparation_status?: string
+        rolling_score?: number
+        thread_score_snapshot?: Record<string, unknown> | null
+        primary_question_count?: number
+        limits?: {
+          min_questions: number
+          target_questions: number
+          max_questions: number
+        }
+      }
+      if (payload.type === 'token' && payload.delta) {
+        onToken(payload.delta)
+      }
+      if (payload.type === 'done') {
+        donePayload = {
+          message: payload.message || '',
+          phase: payload.phase || '',
+          turn_types: payload.turn_types || [],
+          tool_calls: payload.tool_calls || [],
+          context_sources: payload.context_sources || [],
+          preparation_status: payload.preparation_status,
+          rolling_score: typeof payload.rolling_score === 'number' ? payload.rolling_score : null,
+          thread_score_snapshot: payload.thread_score_snapshot ?? null,
+          primary_question_count: payload.primary_question_count ?? 0,
+          limits: payload.limits ?? null,
+        }
+      }
+    }
+  }
+
+  if (!donePayload) {
+    throw new Error('Interview stream ended without completion payload')
+  }
+  return donePayload
+}
+
+export const endInterviewChatSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<{
+  session_id: string
+  status: string
+  handoff_status: string
+  handoff_run_id: string | null
+  feedback: InterviewChatFeedback | null
+}> => {
+  const { data } = await api.post<{
+    session_id: string
+    status: string
+    handoff_status: string
+    handoff_run_id: string | null
+    feedback: InterviewChatFeedback | null
+  }>(
+    `/interview-chat/jobs/${jobId}/sessions/${sessionId}/end`,
+  )
+  return data
+}
+
+export const deleteInterviewChatSession = async (
+  jobId: number,
+  sessionId: string,
+): Promise<{ session_id: string; status: string }> => {
+  const { data } = await api.delete<{ session_id: string; status: string }>(
+    `/interview-chat/jobs/${jobId}/sessions/${sessionId}`,
+  )
+  return data
+}
+
+export const transcribeInterviewAudio = async (
+  jobId: number,
+  sessionId: string,
+  audioBlob: Blob,
+): Promise<{ transcript: string; latency_ms: number }> => {
+  const form = new FormData()
+  form.append('audio_file', audioBlob, 'interview-input.webm')
+  try {
+    const { data } = await api.post<{ transcript: string; latency_ms: number }>(
+      `/interview-chat/jobs/${jobId}/sessions/${sessionId}/transcribe`,
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000 },
+    )
+    return data
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      const detail = (error.response?.data as { detail?: string } | undefined)?.detail
+      throw new Error(detail || `Transcription failed (${error.response?.status ?? 'network'})`)
+    }
+    throw error
+  }
 }
 
 // ── Jobs (Phase 2) ────────────────────────────────────────────────────────────
@@ -242,7 +604,73 @@ export interface Job {
   matched_keywords?: string[]
   missing_keywords?: string[]
   gap_analysis?: string
+  reason?: string
   created_at: string
+}
+
+export interface InterviewResearchQuestion {
+  question: string
+  question_text?: string
+  tool: string
+  query: string
+  source_url: string
+  source_title: string
+  source_type?: string
+  query_used?: string
+  reason?: string
+  timestamp: string
+  snippet: string
+  confidence_score: number
+  citations?: InterviewResearchCitation[]
+}
+
+export interface InterviewResearchCitation {
+  source_url: string
+  source_title: string
+  snippet: string
+  page_index?: number | null
+  confidence: number
+}
+
+export interface InterviewResearchQuestionBank {
+  behavioral: InterviewResearchQuestion[]
+  technical: InterviewResearchQuestion[]
+  system_design: InterviewResearchQuestion[]
+  company_specific: InterviewResearchQuestion[]
+  source_urls: string[]
+}
+
+export interface InterviewResearchSession {
+  session_id: string
+  role: string
+  company: string
+  status: string
+  job_id: number
+  question_bank: InterviewResearchQuestionBank
+  fallback_used: boolean
+  message: string
+  metadata: Record<string, unknown>
+  source_urls: string[]
+  failure_reason: string | null
+  stage: string | null
+  processing_ms: number | null
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+
+export type InterviewResearchProgressItem = {
+  stage: string
+  tool: string
+  query: string
+  status: string
+  latency_ms: number
+  result_count: number
+  rejected_count: number
+  error: string
+  metadata: Record<string, unknown>
+  timestamp: string
 }
 
 export interface JobSearchResponse {
@@ -314,6 +742,30 @@ export const getJobs = async (filters?: {
 
 export const getJob = async (id: number): Promise<Job> => {
   const { data } = await api.get<Job>(`/jobs/${id}`)
+  return data
+}
+
+export interface JobAnalysisResult {
+  job_id: number
+  run_id: string
+  run_status: string
+  run_state: string
+  fit_score?: number
+  matched_keywords: string[]
+  missing_keywords: string[]
+  gap_analysis?: string
+  reason?: string
+  rewrite_suggestions: string[]
+  matched_keyword_evidence: ScoreEvidenceRecord[]
+  missing_keyword_evidence: ScoreEvidenceRecord[]
+  rewrite_suggestion_evidence: ScoreEvidenceRecord[]
+  agent_plan?: ScoreAgentPlan
+  failure_reason?: string
+  failed_step?: string
+}
+
+export const analyzeJob = async (jobId: number): Promise<JobAnalysisResult> => {
+  const { data } = await api.post<JobAnalysisResult>(`/jobs/${jobId}/analyze`, {}, { timeout: 180000 })
   return data
 }
 

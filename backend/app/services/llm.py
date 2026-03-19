@@ -1,10 +1,27 @@
 """LiteLLM-backed LLM service with multi-provider support."""
+import logging
 import json
 import re
+import asyncio
+import os
 from html import unescape
 from urllib.parse import urlparse
 from typing import Any
+from sqlalchemy.orm import Session
 from ..config import get_settings
+from .interview_docs import fetch_context_from_interview_documents
+
+logger = logging.getLogger(__name__)
+
+_LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "3"))
+_LLM_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    global _LLM_SEMAPHORE
+    if _LLM_SEMAPHORE is None:
+        _LLM_SEMAPHORE = asyncio.Semaphore(_LLM_CONCURRENCY)
+    return _LLM_SEMAPHORE
 
 
 def _get_litellm_model() -> tuple[str, dict[str, Any]]:
@@ -119,11 +136,78 @@ Given the following CV and job description, analyse how well the CV matches the 
 
 Return ONLY valid JSON with this exact structure:
 {{
+  "score_payload_version": "evidence-grounded-v1",
   "fit_score": <integer 0-100>,
   "matched_keywords": [<list of strings>],
   "missing_keywords": [<list of strings>],
   "gap_analysis": "<2-4 sentence narrative>",
-  "rewrite_suggestions": [<list of 3-5 specific suggestion strings>]
+  "rewrite_suggestions": [<list of 3-5 specific suggestion strings>],
+  "matched_keyword_evidence": [
+    {{
+      "value": "<matched keyword>",
+      "cv_citations": [
+        {{
+          "section_id": "<stable section id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }}
+      ],
+      "jd_phrase_citations": [
+        {{
+          "phrase_id": "<stable jd phrase id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }}
+      ],
+      "evidence_missing_reason": null | "<why evidence was not available>"
+    }}
+  ],
+  "missing_keyword_evidence": [
+    {{
+      "value": "<missing keyword>",
+      "cv_citations": [
+        {{
+          "section_id": "<stable section id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }}
+      ],
+      "jd_phrase_citations": [
+        {{
+          "phrase_id": "<stable jd phrase id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }}
+      ],
+      "evidence_missing_reason": "<required if evidence is not available>"
+    }}
+  ],
+  "rewrite_suggestion_evidence": [
+    {{
+      "value": "<rewrite suggestion>",
+      "cv_citations": [
+        {{
+          "section_id": "<stable section id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }}
+      ],
+      "jd_phrase_citations": [
+        {{
+          "phrase_id": "<stable jd phrase id>",
+          "line_start": <1-based int>,
+          "line_end": <1-based int>,
+          "snippet": "<short 1-2 line snippet>"
+        }}
+      ],
+      "evidence_missing_reason": null | "<why evidence was not available>"
+    }}
+  ]
 }}
 
 CV:
@@ -134,6 +218,25 @@ Job Description:
 
 Role/Signal map:
 {role_signal_map}
+"""
+
+SCORE_FAST_PROMPT = """You are a resume screening assistant.
+
+Given the CV and job description below, return a quick fit assessment.
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "fit_score": <integer 0-100>,
+  "matched_keywords": [<up to 8 strings>],
+  "missing_keywords": [<up to 8 strings>],
+  "gap_analysis": "<1-2 sentence summary>"
+}}
+
+CV:
+{cv_text}
+
+Job Description:
+{jd_text}
 """
 
 CV_REWRITE_PROPOSAL_PROMPT = """
@@ -259,14 +362,214 @@ def _coerce_list_block(value: object) -> list[str]:
     return _coerce_string_list(value)[:8]
 
 
+def _coerce_int(value: object, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _normalize_evidence_snippet(value: object, max_chars: int = 220) -> str:
+    raw = _coerce_non_empty_string(value)
+    if not raw:
+        return ""
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return raw.strip()[:max_chars]
+    return " | ".join(lines[:2])[:max_chars]
+
+
+def _coerce_line_range(value: object) -> tuple[int, int]:
+    values = value if isinstance(value, dict) else {}
+    line_start = _coerce_int(values.get("start"), 1)
+    line_end = _coerce_int(values.get("end"), line_start)
+    if line_start < 1:
+        line_start = 1
+    if line_end < line_start:
+        line_end = line_start
+    return line_start, line_end
+
+
+def _coerce_cv_citation(value: object, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    section_id = _coerce_non_empty_string(value.get("section_id")) or _coerce_non_empty_string(value.get("id"))
+    if not section_id:
+        section_id = f"cv_section_{index + 1}"
+    line_start = _coerce_int(value.get("line_start"), index + 1)
+    line_end = _coerce_int(value.get("line_end"), line_start)
+    if isinstance(value.get("line_range"), dict):
+        line_start, line_end = _coerce_line_range(value.get("line_range"))
+    if line_start < 1:
+        line_start = 1
+    if line_end < line_start:
+        line_end = line_start
+    return {
+        "section_id": section_id,
+        "line_start": line_start,
+        "line_end": line_end,
+        "snippet": _normalize_evidence_snippet(value.get("snippet")),
+    }
+
+
+def _coerce_jd_citation(value: object, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    phrase_id = _coerce_non_empty_string(value.get("phrase_id")) or _coerce_non_empty_string(value.get("id"))
+    if not phrase_id:
+        phrase_id = f"jd_phrase_{index + 1}"
+    line_start = _coerce_int(value.get("line_start"), index + 1)
+    line_end = _coerce_int(value.get("line_end"), line_start)
+    if isinstance(value.get("line_range"), dict):
+        line_start, line_end = _coerce_line_range(value.get("line_range"))
+    if line_start < 1:
+        line_start = 1
+    if line_end < line_start:
+        line_end = line_start
+    return {
+        "phrase_id": phrase_id,
+        "phrase": _coerce_non_empty_string(value.get("phrase")) or "",
+        "line_start": line_start,
+        "line_end": line_end,
+        "snippet": _normalize_evidence_snippet(value.get("snippet")),
+    }
+
+
+def _coerce_citation_list(values: object, kind: str, index_offset: int = 0) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    output: list[dict[str, Any]] = []
+    for offset, value in enumerate(values):
+        if kind == "cv":
+            citation = _coerce_cv_citation(value, index_offset + offset)
+        else:
+            citation = _coerce_jd_citation(value, index_offset + offset)
+        if citation is None:
+            continue
+        if _normalize_evidence_snippet(citation.get("snippet")):
+            output.append(citation)
+    return output
+
+
+def _coerce_score_evidence_record(value: object, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    entry_value = _coerce_non_empty_string(
+        value.get("value")
+        or value.get("keyword")
+        or value.get("suggestion")
+        or value.get("item")
+    )
+    if not entry_value:
+        return None
+    record = {
+        "value": entry_value,
+        "cv_citations": _coerce_citation_list(
+            value.get("cv_citations"),
+            kind="cv",
+            index_offset=index,
+        ),
+        "jd_phrase_citations": _coerce_citation_list(
+            value.get("jd_phrase_citations"),
+            kind="jd",
+            index_offset=index,
+        ),
+        "evidence_missing_reason": _coerce_non_empty_string(value.get("evidence_missing_reason")),
+    }
+    if not record["cv_citations"] and not record["jd_phrase_citations"] and not record["evidence_missing_reason"]:
+        record["evidence_missing_reason"] = (
+            f"Evidence could not be attached for \"{entry_value}\". "
+            "Re-run scoring with citation capture enabled."
+        )
+    return record
+
+
+def _coerce_score_evidence_rows(items: object, evidence_values: object, *, item_label: str) -> list[dict[str, Any]]:
+    item_values = _coerce_string_list(items)
+    raw_records: list[dict[str, Any]] = []
+    evidence_list = evidence_values if isinstance(evidence_values, list) else []
+    for index, raw_record in enumerate(evidence_list):
+        try:
+            parsed = _coerce_score_evidence_record(raw_record, index)
+        except Exception:
+            logger.exception(
+                "Malformed %s evidence row at index=%s (raw=%r).",
+                item_label,
+                index,
+                raw_record,
+            )
+            parsed = None
+        if parsed is not None:
+            raw_records.append(parsed)
+
+    records_by_value: dict[str, list[dict[str, Any]]] = {}
+    for record in raw_records:
+        key = _coerce_non_empty_string(record.get("value")).strip().lower()
+        if not key:
+            logger.warning(
+                "Evidence row missing fallback value in %s evidence block, skipping row=%r",
+                item_label,
+                record,
+            )
+            continue
+        records_by_value.setdefault(key, []).append(record)
+
+    output: list[dict[str, Any]] = []
+    for item in item_values:
+        normalized_item = item.strip()
+        if not normalized_item:
+            continue
+        normalized_key = normalized_item.lower()
+        row = records_by_value.get(normalized_key, []).pop(0) if normalized_key in records_by_value else None
+        if row:
+            row["value"] = normalized_item
+            output.append(row)
+            continue
+        output.append(
+            {
+                "value": normalized_item,
+                "cv_citations": [],
+                "jd_phrase_citations": [],
+                "evidence_missing_reason": (
+                    f"No evidence row was returned for \"{normalized_item}\" in the {item_label} block."
+                ),
+            }
+        )
+    return output
+
+
 def _coerce_score_payload(score_payload: dict[str, Any]) -> dict[str, Any]:
     """Return a compact payload for downstream prompts."""
+    matched_keyword_evidence = _coerce_score_evidence_rows(
+        score_payload.get("matched_keywords"),
+        score_payload.get("matched_keyword_evidence"),
+        item_label="matched keyword",
+    )
+    missing_keyword_evidence = _coerce_score_evidence_rows(
+        score_payload.get("missing_keywords"),
+        score_payload.get("missing_keyword_evidence"),
+        item_label="missing keyword",
+    )
+    rewrite_suggestion_evidence = _coerce_score_evidence_rows(
+        score_payload.get("rewrite_suggestions"),
+        score_payload.get("rewrite_suggestion_evidence"),
+        item_label="rewrite suggestion",
+    )
+    fit_score = _coerce_int(score_payload.get("fit_score"), 0)
+    if fit_score < 0:
+        fit_score = 0
+    if fit_score > 100:
+        fit_score = 100
     return {
-        "fit_score": score_payload.get("fit_score"),
+        "score_payload_version": _coerce_non_empty_string(score_payload.get("score_payload_version")) or "v1",
+        "fit_score": fit_score,
         "matched_keywords": _coerce_list_block(score_payload.get("matched_keywords")),
         "missing_keywords": _coerce_list_block(score_payload.get("missing_keywords")),
         "gap_analysis": _coerce_non_empty_string(score_payload.get("gap_analysis")) or "",
         "rewrite_suggestions": _coerce_list_block(score_payload.get("rewrite_suggestions")),
+        "matched_keyword_evidence": matched_keyword_evidence,
+        "missing_keyword_evidence": missing_keyword_evidence,
+        "rewrite_suggestion_evidence": rewrite_suggestion_evidence,
     }
 
 
@@ -387,13 +690,14 @@ async def extract_role_signal_map(cv_text: str, jd_text: str) -> dict[str, str |
         jd_text=jd_text[:4000],
     )
 
-    response = await litellm.acompletion(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        max_tokens=1200,
-        **kwargs,
-    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=1200,
+            **kwargs,
+        )
     raw = response.choices[0].message.content.strip()
     match = _extract_first_json_object(raw)
     if match:
@@ -437,12 +741,13 @@ async def score_cv_against_jd(
         role_signal_map=role_signal_text,
     )
 
-    response = await litellm.acompletion(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        **kwargs,
-    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            **kwargs,
+        )
 
     raw = response.choices[0].message.content.strip()
 
@@ -451,16 +756,48 @@ async def score_cv_against_jd(
     if match:
         raw = match.group(0)
 
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        try:
+            data = json.loads(_sanitize_json_token_stream(raw))
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return _coerce_score_payload(data)
 
-    # Normalise
-    data["fit_score"] = max(0, min(100, int(data.get("fit_score", 0))))
-    data["matched_keywords"] = data.get("matched_keywords") or []
-    data["missing_keywords"] = data.get("missing_keywords") or []
-    data["gap_analysis"] = data.get("gap_analysis") or ""
-    data["rewrite_suggestions"] = data.get("rewrite_suggestions") or []
 
-    return data
+async def score_cv_fast(cv_text: str, jd_text: str) -> dict:
+    """Single-call fast scoring for bulk operations. No role analysis, no critic."""
+    import litellm
+
+    model, kwargs = _get_litellm_model()
+    prompt = SCORE_FAST_PROMPT.format(
+        cv_text=cv_text[:4000],
+        jd_text=jd_text[:3000],
+    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            **kwargs,
+        )
+    raw = response.choices[0].message.content.strip()
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        raw = match.group(0)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        try:
+            data = json.loads(_sanitize_json_token_stream(raw))
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return _coerce_score_payload(data)
 
 
 async def generate_cv_rewrite_proposals(
@@ -521,18 +858,19 @@ async def generate_agent_score_plan(
     map_text = json.dumps(safe_map, ensure_ascii=False) if safe_map else "No role/signal map available."
     score_text = json.dumps(_coerce_score_payload(score_payload), ensure_ascii=False)
 
-    response = await litellm.acompletion(
-        model=model,
-        messages=[{"role": "user", "content": AGENT_PLAN_PROMPT.format(
-            cv_text=cv_text[:6000],
-            jd_text=jd_text[:4000],
-            role_signal_map=map_text,
-            score_payload=score_text,
-        )}],
-        temperature=0.25,
-        max_tokens=1200,
-        **kwargs,
-    )
+    async with _get_llm_semaphore():
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": AGENT_PLAN_PROMPT.format(
+                cv_text=cv_text[:6000],
+                jd_text=jd_text[:4000],
+                role_signal_map=map_text,
+                score_payload=score_text,
+            )}],
+            temperature=0.25,
+            max_tokens=1200,
+            **kwargs,
+        )
 
     raw = response.choices[0].message.content.strip()
     match = _extract_first_json_object(raw)
@@ -711,6 +1049,34 @@ Response instructions:
 - Return plain text only.
 - Do not include JSON or markdown.
 - Ask only one follow-up question or one concise hint.
+"""
+
+ADAPTIVE_INTERVIEW_QUESTION_PROMPT = """
+You are a senior technical interviewer.
+Generate exactly one high-quality interview question in polished English.
+
+Return strict JSON only with this schema:
+{{
+  "question": "single interview question text",
+  "rationale": "1-2 sentence reason for choosing this question now"
+}}
+
+Hard requirements:
+- The question must be grammatically correct and natural.
+- Do NOT include bullet lists, markdown, or multiple questions.
+- Keep it concise: 1-3 sentences.
+- Respect category: {category}
+- Role: {role}
+- Company: {company}
+- Performance signal: {performance_signal}
+- Dev focus: {dev_focus}
+- Avoid repeating prior questions or close paraphrases from this list:
+{asked_questions}
+- Use this context when relevant:
+  - Job requirements: {job_requirements}
+  - CV signals: {cv_signals}
+  - Interview memory: {memory_facts}
+  - Retrieved context snippets: {context_snippets}
 """
 
 REVIEW_AND_VARIANT_PROMPT = """
@@ -1181,6 +1547,8 @@ async def simulate_interviewer_chat(
     language: str | None,
     conversation: list[dict[str, str]] | None = None,
     solution_text: str | None = None,
+    db: Session | None = None,
+    job_id: int | None = None,
 ) -> str:
     import litellm
 
@@ -1188,6 +1556,34 @@ async def simulate_interviewer_chat(
     safe_message = message.strip()
     if not safe_message:
         return "Please share a specific question about the problem or your approach."
+
+    document_snippets: list[str] = []
+    if db is not None:
+        try:
+            query_vector = await generate_embedding(safe_message)
+            snippets = fetch_context_from_interview_documents(
+                db=db,
+                query_vector=query_vector,
+                job_id=job_id,
+            )
+            for snippet in snippets[:3]:
+                filename = snippet.get("filename", "interview-doc")
+                owner_type = snippet.get("owner_type", "global")
+                text = snippet.get("snippet", "").strip()
+                if not text:
+                    continue
+                document_snippets.append(
+                    f"- [{owner_type}] {filename}: {text}"
+                )
+        except Exception as exc:
+            logger.debug("Interview doc retrieval failed: %s", exc)
+
+    context_appendix = ""
+    if document_snippets:
+        context_appendix = (
+            "\n\nRelevant interview document snippets:\n"
+            + "\n".join(document_snippets)
+        )
 
     prompt = INTERVIEW_CHAT_PROMPT.format(
         title=title,
@@ -1199,7 +1595,7 @@ async def simulate_interviewer_chat(
         message=safe_message,
         draft_solution=_coerce_non_empty_string(solution_text) or "No draft attached yet.",
         conversation=_history_lines(conversation or []),
-    )
+    ) + context_appendix
 
     try:
         response = await litellm.acompletion(
@@ -1212,6 +1608,243 @@ async def simulate_interviewer_chat(
         return response.choices[0].message.content.strip() or "Tell me which part feels unclear, and we can narrow it down."
     except Exception:
         return "Tell me your approach, and I can challenge one assumption behind it."
+
+
+async def generate_adaptive_interview_question(
+    *,
+    role: str,
+    company: str,
+    category: str,
+    performance_signal: str,
+    dev_focus: bool,
+    asked_questions: list[str],
+    job_requirements: list[str],
+    cv_signals: list[str],
+    memory_facts: list[str],
+    context_snippets: list[str] | None = None,
+) -> dict[str, str]:
+    try:
+        import litellm
+    except Exception as exc:
+        logger.warning("Adaptive interview question generation unavailable (litellm import failed): %s", exc)
+        return {"question": "", "rationale": ""}
+
+    model, kwargs = _get_litellm_model()
+    prompt = ADAPTIVE_INTERVIEW_QUESTION_PROMPT.format(
+        role=role or "this role",
+        company=company or "this company",
+        category=category or "technical",
+        performance_signal=performance_signal or "unknown",
+        dev_focus="yes" if dev_focus else "no",
+        asked_questions=json.dumps(asked_questions[-40:], ensure_ascii=True),
+        job_requirements=json.dumps(job_requirements[:20], ensure_ascii=True),
+        cv_signals=json.dumps(cv_signals[:20], ensure_ascii=True),
+        memory_facts=json.dumps(memory_facts[-20:], ensure_ascii=True),
+        context_snippets=json.dumps((context_snippets or [])[:8], ensure_ascii=True),
+    )
+    try:
+        semaphore = _get_llm_semaphore()
+        async with semaphore:
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.25,
+                max_tokens=320,
+                **kwargs,
+            )
+        raw = _coerce_non_empty_string(response.choices[0].message.content)
+    except Exception as exc:
+        logger.warning("Adaptive interview question generation failed: %s", exc)
+        return {"question": "", "rationale": ""}
+
+    if not raw:
+        return {"question": "", "rationale": ""}
+
+    match = _extract_first_json_object(raw)
+    candidate = match or raw
+    parsed: object = {}
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        try:
+            parsed = json.loads(_sanitize_json_token_stream(candidate))
+        except Exception:
+            return {"question": "", "rationale": ""}
+
+    if not isinstance(parsed, dict):
+        return {"question": "", "rationale": ""}
+
+    question = _coerce_non_empty_string(parsed.get("question"))
+    rationale = _coerce_non_empty_string(parsed.get("rationale"))
+    if not question:
+        return {"question": "", "rationale": ""}
+    if len(question) < 18:
+        return {"question": "", "rationale": ""}
+    return {"question": question, "rationale": rationale}
+
+
+INTERVIEW_REPEAT_INTENT_PROMPT = """
+You classify user intent in a live interview voice/chat setting.
+
+Return ONLY JSON:
+{{
+  "is_repeat_intent": boolean,
+  "reason": "short reason",
+  "confidence": number
+}}
+
+Rules:
+- True when user asks interviewer to repeat, restate, rephrase, clarify, slow down, or say again.
+- False for substantive answer content, new examples, or follow-up details.
+- Be conservative: if uncertain, return false.
+
+Current question:
+{current_question}
+
+Recent assistant context:
+{recent_assistant}
+
+Recent user context:
+{recent_user}
+
+Latest user message:
+{message}
+"""
+
+
+INTERVIEW_ANSWER_VAGUENESS_PROMPT = """
+Evaluate whether a candidate response to the current interview question is vague.
+
+Return ONLY JSON:
+{{
+  "is_vague": boolean,
+  "reason": "short reason",
+  "confidence": number
+}}
+
+Rules:
+- True when the response is non-specific, hedged, or mostly generic and lacks concrete actions, examples, or measurable signals.
+- False for concrete structure, direct decisions, implementation details, trade-offs, validation approach, or measurable outcomes.
+- Be conservative: if uncertain, return false.
+
+Current question:
+{current_question}
+
+Recent assistant context:
+{recent_assistant}
+
+Recent user context:
+{recent_user}
+
+Candidate response:
+{message}
+"""
+
+
+async def classify_interview_repeat_intent(
+    *,
+    message: str,
+    current_question: str,
+    recent_assistant: list[str] | None = None,
+    recent_user: list[str] | None = None,
+) -> dict[str, object]:
+    raw_message = (message or "").strip()
+    if not raw_message:
+        return {"is_repeat_intent": False, "reason": "empty", "confidence": 0.0}
+
+    try:
+        import litellm
+    except Exception as exc:
+        logger.warning("Repeat-intent classification unavailable (litellm import failed): %s", exc)
+        return {"is_repeat_intent": False, "reason": "litellm_unavailable", "confidence": 0.0}
+
+    model, kwargs = _get_litellm_model()
+    prompt = INTERVIEW_REPEAT_INTENT_PROMPT.format(
+        current_question=(current_question or "")[:400],
+        recent_assistant=json.dumps((recent_assistant or [])[-3:], ensure_ascii=True),
+        recent_user=json.dumps((recent_user or [])[-3:], ensure_ascii=True),
+        message=raw_message[:450],
+    )
+    try:
+        async with _get_llm_semaphore():
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=140,
+                **kwargs,
+            )
+        raw = _coerce_non_empty_string(response.choices[0].message.content)
+        match = _extract_first_json_object(raw)
+        candidate = match or raw
+        parsed: object = {}
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            parsed = json.loads(_sanitize_json_token_stream(candidate))
+        if not isinstance(parsed, dict):
+            return {"is_repeat_intent": False, "reason": "invalid_shape", "confidence": 0.0}
+        return {
+            "is_repeat_intent": bool(parsed.get("is_repeat_intent")),
+            "reason": _coerce_non_empty_string(parsed.get("reason")),
+            "confidence": float(parsed.get("confidence") or 0),
+        }
+    except Exception as exc:
+        logger.warning("Repeat-intent classification failed: %s", exc)
+        return {"is_repeat_intent": False, "reason": "classification_error", "confidence": 0.0}
+
+
+async def classify_interview_answer_vagueness(
+    *,
+    message: str,
+    current_question: str,
+    recent_assistant: list[str] | None = None,
+    recent_user: list[str] | None = None,
+) -> dict[str, object]:
+    raw_message = (message or "").strip()
+    if not raw_message:
+        return {"is_vague": False, "reason": "empty", "confidence": 0.0}
+
+    try:
+        import litellm
+    except Exception as exc:
+        logger.warning("Answer-vagueness classification unavailable (litellm import failed): %s", exc)
+        return {"is_vague": False, "reason": "litellm_unavailable", "confidence": 0.0}
+
+    model, kwargs = _get_litellm_model()
+    prompt = INTERVIEW_ANSWER_VAGUENESS_PROMPT.format(
+        current_question=(current_question or "")[:500],
+        recent_assistant=json.dumps((recent_assistant or [])[-3:], ensure_ascii=True),
+        recent_user=json.dumps((recent_user or [])[-3:], ensure_ascii=True),
+        message=raw_message[:700],
+    )
+    try:
+        async with _get_llm_semaphore():
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=160,
+                **kwargs,
+            )
+        raw = _coerce_non_empty_string(response.choices[0].message.content)
+        match = _extract_first_json_object(raw)
+        candidate = match or raw
+        parsed: object = {}
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            parsed = json.loads(_sanitize_json_token_stream(candidate))
+        if not isinstance(parsed, dict):
+            return {"is_vague": False, "reason": "invalid_shape", "confidence": 0.0}
+        return {
+            "is_vague": bool(parsed.get("is_vague")),
+            "reason": _coerce_non_empty_string(parsed.get("reason")),
+            "confidence": float(parsed.get("confidence") or 0.0),
+        }
+    except Exception as exc:
+        logger.warning("Answer-vagueness classification failed: %s", exc)
+        return {"is_vague": False, "reason": "classification_error", "confidence": 0.0}
 
 
 async def review_solution_with_variant(

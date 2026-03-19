@@ -31,6 +31,24 @@ class Settings(BaseSettings):
 
     save_history: bool = True
     default_export_format: str = "json"
+    tts_provider: str = "kokoro"
+    voice_preferred_name: str = ""
+    voice_rate: float = 1.0
+    voice_pitch: float = 1.0
+
+    # Research infra (self-hosted SearXNG)
+    searxng_enabled: bool = True
+    searxng_base_url: str = "http://searxng:8080"
+    searxng_timeout_seconds: int = 8
+    searxng_client_ip: str = "127.0.0.1"
+    interview_research_timeout_seconds: int = 20
+    interview_research_tool_timeout_seconds: int = 12
+    interview_research_blocked_domains: str = (
+        "linkedin.com/jobs,jobinja.ir,careerbuilder.com,indeed.com,monster.com,"
+        "fiverr.com,upwork.com,ziprecruiter.com,glassdoor.com/jobs,angel.co/jobs,"
+        "zohorecruit.com,zohorecruit.in,vk.com,geeksforgeeks.org,github.com/indy256"
+    )
+    interview_research_allowed_domains: str = ""
 
     # Phase 2
     celery_broker_url: str = "redis://redis:6379/0"
@@ -48,6 +66,13 @@ class Settings(BaseSettings):
 
     # Local-context tooling
     local_context_environment: str = "dev"
+
+    # Local speech-to-text
+    stt_enabled: bool = True
+    stt_model_size: str = "base"
+    stt_device: str = "auto"
+    stt_compute_type: str = "int8"
+    stt_no_speech_threshold: float = 0.6
 
     model_config = ConfigDict(
         env_file=".env",
