@@ -751,11 +751,42 @@ export interface StudyMindMapResponse {
   node_sources: Record<string, string>
   created_at: string | null
   cached: boolean
+  task_id: string | null
 }
 
 export interface GenerateStudyMindMapRequest {
-  job_id: number
+  job_id?: number | null
   doc_id?: number | null
+}
+
+export interface MindMapJobStartResponse {
+  task_id: string
+  status: string
+}
+
+export interface MindMapJobStatusResponse {
+  task_id: string
+  status: 'pending' | 'processing' | 'done' | 'failed'
+  error?: string | null
+  graph?: MindMapGraph | null
+}
+
+export interface MindMapNodeSource {
+  index: number
+  filename: string
+  snippet: string
+}
+
+export interface MindMapNodeInfoResponse {
+  node_id: string
+  encyclopedic: string
+  interview_prep: string
+  sources: MindMapNodeSource[]
+}
+
+export interface MindMapChatResponse {
+  answer: string
+  sources: MindMapNodeSource[]
 }
 
 export interface StudyCardSetRenameRequest {
@@ -950,6 +981,37 @@ export const getStudyMindMap = async (
   const { data } = await api.get<StudyMindMapResponse>('/study/mindmap', {
     params: { job_id: jobId, doc_id: docId ?? undefined },
   })
+  return data
+}
+
+export const startMindMapJob = async (request: GenerateStudyMindMapRequest): Promise<MindMapJobStartResponse> => {
+  const { data } = await api.post<MindMapJobStartResponse>('/study/mindmap', request)
+  return data
+}
+
+export const getMindMapJobStatus = async (taskId: string): Promise<MindMapJobStatusResponse> => {
+  const { data } = await api.get<MindMapJobStatusResponse>(`/study/mindmap/status/${encodeURIComponent(taskId)}`)
+  return data
+}
+
+export const getLatestMindMapJob = async (params: { job_id?: number | null; doc_id?: number | null }): Promise<MindMapJobStatusResponse> => {
+  const { data } = await api.get<MindMapJobStatusResponse>('/study/mindmap/latest', { params })
+  return data
+}
+
+export const getMindMapNodeInfo = async (taskId: string, nodeId: string): Promise<MindMapNodeInfoResponse> => {
+  const { data } = await api.get<MindMapNodeInfoResponse>(
+    `/study/mindmap/${encodeURIComponent(taskId)}/node/${encodeURIComponent(nodeId)}`,
+  )
+  return data
+}
+
+export const chatMindMap = async (taskId: string, message: string): Promise<MindMapChatResponse> => {
+  const { data } = await api.post<MindMapChatResponse>(
+    `/study/mindmap/${encodeURIComponent(taskId)}/chat`,
+    { message },
+    { timeout: 60000 },
+  )
   return data
 }
 
