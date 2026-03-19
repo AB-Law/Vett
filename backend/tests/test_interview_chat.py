@@ -141,6 +141,67 @@ async def test_interview_chat_vague_answer_triggers_follow_up():
 
 
 @pytest.mark.asyncio
+async def test_interview_chat_run_on_generic_answer_triggers_follow_up():
+    db = _new_db_session()
+    job = Job(title="ML Engineer", company="City Greens", description="Build AI features with strong reliability.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    await _stream_turn(db, job.id, session.session_id, None)
+    await _stream_turn(
+        db,
+        job.id,
+        session.session_id,
+        (
+            "hey so my approach is i would first take a look at data and then maybe try to look into all sources "
+            "and kind of compare things and then probably have planning and then another agent checks and gives "
+            "feedback and i think that should work"
+        ),
+    )
+
+    last_assistant_turn = (
+        db.query(InterviewChatTurn)
+        .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
+        .filter(InterviewChatSession.session_id == session.session_id, InterviewChatTurn.speaker == "assistant")
+        .order_by(InterviewChatTurn.turn_index.desc())
+        .first()
+    )
+    assert last_assistant_turn is not None
+    assert last_assistant_turn.turn_type == "follow_up"
+    assert "concrete example" in (last_assistant_turn.content or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_interview_chat_escalates_follow_up_after_repeated_vague_answers():
+    db = _new_db_session()
+    job = Job(title="Backend Engineer", company="ProbeCo", description="Build resilient APIs.")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    session = interview_chat_router.create_or_resume_interview_session(job.id, db=db).session
+    await _stream_turn(db, job.id, session.session_id, None)
+    await _stream_turn(db, job.id, session.session_id, "Not sure, maybe we just optimize a bit.")
+    await _stream_turn(db, job.id, session.session_id, "i think we can kind of improve things probably")
+
+    assistant_followups = (
+        db.query(InterviewChatTurn)
+        .join(InterviewChatSession, InterviewChatSession.id == InterviewChatTurn.session_id)
+        .filter(
+            InterviewChatSession.session_id == session.session_id,
+            InterviewChatTurn.speaker == "assistant",
+            InterviewChatTurn.turn_type == "follow_up",
+        )
+        .order_by(InterviewChatTurn.turn_index.asc())
+        .all()
+    )
+    assert len(assistant_followups) >= 2
+    assert "pick one real project" in (assistant_followups[-1].content or "").lower()
+
+
+@pytest.mark.asyncio
 async def test_thread_guardrail_does_not_increment_primary_question_count_until_thread_closes():
     db = _new_db_session()
     job = Job(title="Backend Engineer", company="GuardrailCo", description="Build and scale APIs.")

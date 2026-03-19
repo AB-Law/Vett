@@ -1683,6 +1683,170 @@ async def generate_adaptive_interview_question(
     return {"question": question, "rationale": rationale}
 
 
+INTERVIEW_REPEAT_INTENT_PROMPT = """
+You classify user intent in a live interview voice/chat setting.
+
+Return ONLY JSON:
+{{
+  "is_repeat_intent": boolean,
+  "reason": "short reason",
+  "confidence": number
+}}
+
+Rules:
+- True when user asks interviewer to repeat, restate, rephrase, clarify, slow down, or say again.
+- False for substantive answer content, new examples, or follow-up details.
+- Be conservative: if uncertain, return false.
+
+Current question:
+{current_question}
+
+Recent assistant context:
+{recent_assistant}
+
+Recent user context:
+{recent_user}
+
+Latest user message:
+{message}
+"""
+
+
+INTERVIEW_ANSWER_VAGUENESS_PROMPT = """
+Evaluate whether a candidate response to the current interview question is vague.
+
+Return ONLY JSON:
+{{
+  "is_vague": boolean,
+  "reason": "short reason",
+  "confidence": number
+}}
+
+Rules:
+- True when the response is non-specific, hedged, or mostly generic and lacks concrete actions, examples, or measurable signals.
+- False for concrete structure, direct decisions, implementation details, trade-offs, validation approach, or measurable outcomes.
+- Be conservative: if uncertain, return false.
+
+Current question:
+{current_question}
+
+Recent assistant context:
+{recent_assistant}
+
+Recent user context:
+{recent_user}
+
+Candidate response:
+{message}
+"""
+
+
+async def classify_interview_repeat_intent(
+    *,
+    message: str,
+    current_question: str,
+    recent_assistant: list[str] | None = None,
+    recent_user: list[str] | None = None,
+) -> dict[str, object]:
+    raw_message = (message or "").strip()
+    if not raw_message:
+        return {"is_repeat_intent": False, "reason": "empty", "confidence": 0.0}
+
+    try:
+        import litellm
+    except Exception as exc:
+        logger.warning("Repeat-intent classification unavailable (litellm import failed): %s", exc)
+        return {"is_repeat_intent": False, "reason": "litellm_unavailable", "confidence": 0.0}
+
+    model, kwargs = _get_litellm_model()
+    prompt = INTERVIEW_REPEAT_INTENT_PROMPT.format(
+        current_question=(current_question or "")[:400],
+        recent_assistant=json.dumps((recent_assistant or [])[-3:], ensure_ascii=True),
+        recent_user=json.dumps((recent_user or [])[-3:], ensure_ascii=True),
+        message=raw_message[:450],
+    )
+    try:
+        async with _get_llm_semaphore():
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=140,
+                **kwargs,
+            )
+        raw = _coerce_non_empty_string(response.choices[0].message.content)
+        match = _extract_first_json_object(raw)
+        candidate = match or raw
+        parsed: object = {}
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            parsed = json.loads(_sanitize_json_token_stream(candidate))
+        if not isinstance(parsed, dict):
+            return {"is_repeat_intent": False, "reason": "invalid_shape", "confidence": 0.0}
+        return {
+            "is_repeat_intent": bool(parsed.get("is_repeat_intent")),
+            "reason": _coerce_non_empty_string(parsed.get("reason")),
+            "confidence": float(parsed.get("confidence") or 0),
+        }
+    except Exception as exc:
+        logger.warning("Repeat-intent classification failed: %s", exc)
+        return {"is_repeat_intent": False, "reason": "classification_error", "confidence": 0.0}
+
+
+async def classify_interview_answer_vagueness(
+    *,
+    message: str,
+    current_question: str,
+    recent_assistant: list[str] | None = None,
+    recent_user: list[str] | None = None,
+) -> dict[str, object]:
+    raw_message = (message or "").strip()
+    if not raw_message:
+        return {"is_vague": False, "reason": "empty", "confidence": 0.0}
+
+    try:
+        import litellm
+    except Exception as exc:
+        logger.warning("Answer-vagueness classification unavailable (litellm import failed): %s", exc)
+        return {"is_vague": False, "reason": "litellm_unavailable", "confidence": 0.0}
+
+    model, kwargs = _get_litellm_model()
+    prompt = INTERVIEW_ANSWER_VAGUENESS_PROMPT.format(
+        current_question=(current_question or "")[:500],
+        recent_assistant=json.dumps((recent_assistant or [])[-3:], ensure_ascii=True),
+        recent_user=json.dumps((recent_user or [])[-3:], ensure_ascii=True),
+        message=raw_message[:700],
+    )
+    try:
+        async with _get_llm_semaphore():
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=160,
+                **kwargs,
+            )
+        raw = _coerce_non_empty_string(response.choices[0].message.content)
+        match = _extract_first_json_object(raw)
+        candidate = match or raw
+        parsed: object = {}
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            parsed = json.loads(_sanitize_json_token_stream(candidate))
+        if not isinstance(parsed, dict):
+            return {"is_vague": False, "reason": "invalid_shape", "confidence": 0.0}
+        return {
+            "is_vague": bool(parsed.get("is_vague")),
+            "reason": _coerce_non_empty_string(parsed.get("reason")),
+            "confidence": float(parsed.get("confidence") or 0.0),
+        }
+    except Exception as exc:
+        logger.warning("Answer-vagueness classification failed: %s", exc)
+        return {"is_vague": False, "reason": "classification_error", "confidence": 0.0}
+
+
 async def review_solution_with_variant(
     *,
     title: str,

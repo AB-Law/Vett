@@ -20,6 +20,7 @@ export default function App() {
         <Route path="jobs" element={<Jobs />} />
         <Route path="jobs/:id" element={<JobDetails />} />
         <Route path="jobs/:id/interview-prep" element={<InterviewPrep />} />
+        <Route path="jobs/:id/interview-prep/voice" element={<InterviewPrep />} />
         <Route path="practice/coach" element={<SolvePractice />} />
         <Route path="settings" element={<Settings />} />
       </Route>

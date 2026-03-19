@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Loader2, Play, Square, MessageCircle, Sparkles, Trash2, Mic, MicOff } from 'lucide-react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { ArrowLeft, Loader2, Play, Square, MessageCircle, Sparkles, Trash2, Mic, MicOff, Radio, Volume2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import {
@@ -9,6 +9,7 @@ import {
   endInterviewChatSession,
   getInterviewChatSession,
   getJob,
+  getSettings,
   listInterviewChatSessions,
   streamInterviewChatTurn,
   transcribeInterviewAudio,
@@ -17,11 +18,14 @@ import {
   type InterviewChatSessionDetail,
   type Job,
 } from '../lib/api'
+import { AdvancedVoiceManager, type VoiceConversationState } from '../lib/voice/advancedVoiceManager'
 
 type SttState = 'idle' | 'recording' | 'transcribing' | 'error'
 
 export default function InterviewPrep() {
   const { id } = useParams<{ id: string }>()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [job, setJob] = useState<Job | null>(null)
   const [sessions, setSessions] = useState<InterviewChatSession[]>([])
   const [activeSession, setActiveSession] = useState<InterviewChatSessionDetail | null>(null)
@@ -32,6 +36,14 @@ export default function InterviewPrep() {
   const [latestFeedback, setLatestFeedback] = useState<InterviewChatFeedback | null>(null)
   const [sttState, setSttState] = useState<SttState>('idle')
   const [sttError, setSttError] = useState<string | null>(null)
+  const [voiceModeEnabled, setVoiceModeEnabled] = useState(false)
+  const [voiceState, setVoiceState] = useState<VoiceConversationState>('IDLE')
+  const [voiceSupported, setVoiceSupported] = useState(false)
+  const [voiceStatusDetail, setVoiceStatusDetail] = useState('Voice mode is off')
+  const [ttsStatusMessage, setTtsStatusMessage] = useState('')
+  const [ttsEngineBadge, setTtsEngineBadge] = useState<'kokoro' | 'native'>('kokoro')
+  const [lastAssistantSpeech, setLastAssistantSpeech] = useState('')
+  const [canResumeAssistantSpeech, setCanResumeAssistantSpeech] = useState(false)
   const [isRecorderSupported] = useState<boolean>(
     globalThis.window !== undefined &&
       typeof navigator !== 'undefined' &&
@@ -44,8 +56,15 @@ export default function InterviewPrep() {
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioChunksRef = useRef<BlobPart[]>([])
   const sttStartedAtRef = useRef<number | null>(null)
+  const voiceManagerRef = useRef<AdvancedVoiceManager | null>(null)
+  const streamedSpeechTokensRef = useRef(0)
+  const streamAbortRef = useRef<AbortController | null>(null)
+  const streamingTextRef = useRef('')
+  const sendMessageTextRef = useRef<(text: string) => Promise<void>>(async () => {})
+  const voicePageAutoStartRef = useRef(false)
 
   const numericId = useMemo(() => Number(id || 0), [id])
+  const isVoicePage = location.pathname.endsWith('/voice')
 
   const refreshSessions = async (): Promise<void> => {
     if (!Number.isInteger(numericId) || numericId <= 0) return
@@ -57,6 +76,21 @@ export default function InterviewPrep() {
     const detail = await getInterviewChatSession(numericId, sessionId)
     setActiveSession(detail)
     setLatestFeedback(detail.feedback || null)
+  }
+
+  const cancelInFlightAssistant = (): void => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort()
+      streamAbortRef.current = null
+    }
+    if (voiceManagerRef.current) {
+      const current = voiceManagerRef.current.getCurrentSpeechText()
+      if (current.trim()) {
+        setLastAssistantSpeech(current)
+        setCanResumeAssistantSpeech(true)
+      }
+      voiceManagerRef.current.cancelSpeech()
+    }
   }
 
   useEffect(() => {
@@ -87,22 +121,117 @@ export default function InterviewPrep() {
   }, [numericId])
 
   useEffect(() => {
+    let cancelled = false
+    const manager = new AdvancedVoiceManager({
+      onStateChange: (state) => {
+        if (!cancelled) {
+          setVoiceState(state)
+          if (state === 'IDLE') setVoiceStatusDetail('Voice mode is idle')
+          if (state === 'LISTENING') setVoiceStatusDetail('Mic hot: listening')
+          if (state === 'THINKING') setVoiceStatusDetail('Processing your response')
+          if (state === 'SPEAKING') setVoiceStatusDetail('Assistant is speaking')
+        }
+      },
+      onError: (message) => {
+        if (!cancelled) {
+          setVoiceStatusDetail(`Voice error: ${message}`)
+          toast.error(`Voice mode error: ${message}`)
+        }
+      },
+      onBargeIn: () => {
+        if (!cancelled) cancelInFlightAssistant()
+      },
+      onFinalTranscript: (text) => {
+        if (!cancelled) {
+          setDraft(text)
+          void sendMessageTextRef.current(text)
+        }
+      },
+      onTtsStatus: (message, provider) => {
+        if (!cancelled) {
+          setTtsStatusMessage(message)
+          setTtsEngineBadge(provider)
+        }
+      },
+      getActiveAssistantText: () => voiceManagerRef.current?.getCurrentSpeechText() || streamingTextRef.current,
+    })
+    voiceManagerRef.current = manager
+    setVoiceSupported(manager.isSupported)
+    void (async () => {
+      try {
+        const settings = await getSettings()
+        if (cancelled) return
+        manager.setPreferences({
+          preferredVoiceName: settings.voice_preferred_name,
+          rate: settings.voice_rate,
+          pitch: settings.voice_pitch,
+          ttsProvider: settings.tts_provider || 'kokoro',
+        })
+      } catch {
+        // Leave defaults when settings are unavailable.
+      }
+    })()
+    return () => {
+      cancelled = true
+      manager.dispose()
+      voiceManagerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
     autoStartedRef.current = false
   }, [numericId])
+
+  useEffect(() => {
+    streamingTextRef.current = streamingText
+  }, [streamingText])
 
   const streamTurn = async (message: string | null): Promise<void> => {
     if (!activeSession || sending) return
     setSending(true)
     setStreamingText('')
+    const abortController = new AbortController()
+    streamAbortRef.current = abortController
+    streamedSpeechTokensRef.current = 0
+    if (voiceModeEnabled) {
+      setVoiceState('THINKING')
+      setVoiceStatusDetail('Processing your response')
+    }
     try {
-      await streamInterviewChatTurn(numericId, activeSession.session_id, message, (token) => {
-        setStreamingText((current) => current + token)
-      })
+      const result = await streamInterviewChatTurn(
+        numericId,
+        activeSession.session_id,
+        message,
+        (token) => {
+          setStreamingText((current) => current + token)
+          if (voiceModeEnabled && token.trim()) {
+            streamedSpeechTokensRef.current += 1
+            voiceManagerRef.current?.onAssistantToken(token)
+          }
+        },
+        { signal: abortController.signal },
+      )
       await loadSessionDetail(activeSession.session_id)
       await refreshSessions()
+      if (voiceModeEnabled && result.message.trim()) {
+        setLastAssistantSpeech(result.message)
+        setCanResumeAssistantSpeech(false)
+        if (streamedSpeechTokensRef.current > 0) {
+          voiceManagerRef.current?.flushAssistantSpeechBuffer()
+        } else {
+          voiceManagerRef.current?.speak(result.message)
+        }
+      }
     } catch (error: unknown) {
-      toast.error(error instanceof Error ? error.message : 'Interview stream failed')
+      const isAbort = error instanceof DOMException && error.name === 'AbortError'
+      if (!isAbort) {
+        toast.error(error instanceof Error ? error.message : 'Interview stream failed')
+      }
     } finally {
+      if (streamAbortRef.current === abortController) {
+        streamAbortRef.current = null
+      }
+      streamedSpeechTokensRef.current = 0
       setStreamingText('')
       setSending(false)
     }
@@ -158,12 +287,32 @@ export default function InterviewPrep() {
       if (!session.turns.length) {
         setSending(true)
         setStreamingText('')
-        await streamInterviewChatTurn(numericId, session.session_id, null, (token) => {
-          setStreamingText((current) => current + token)
-        })
+        streamedSpeechTokensRef.current = 0
+        const result = await streamInterviewChatTurn(
+          numericId,
+          session.session_id,
+          null,
+          (token) => {
+            setStreamingText((current) => current + token)
+            if (voiceModeEnabled && token.trim()) {
+              streamedSpeechTokensRef.current += 1
+              voiceManagerRef.current?.onAssistantToken(token)
+            }
+          },
+        )
         const updated = await getInterviewChatSession(numericId, session.session_id)
         setActiveSession(updated)
         setLatestFeedback(updated.feedback || null)
+        if (voiceModeEnabled && result.message.trim()) {
+          setLastAssistantSpeech(result.message)
+          setCanResumeAssistantSpeech(false)
+          if (streamedSpeechTokensRef.current > 0) {
+            voiceManagerRef.current?.flushAssistantSpeechBuffer()
+          } else {
+            voiceManagerRef.current?.speak(result.message)
+          }
+        }
+        streamedSpeechTokensRef.current = 0
       }
     } catch {
       toast.error('Could not start interview prep')
@@ -188,6 +337,40 @@ export default function InterviewPrep() {
 
   const sendMessage = async (): Promise<void> => {
     await sendMessageText(draft)
+  }
+  sendMessageTextRef.current = sendMessageText
+
+  const toggleVoiceMode = (): void => {
+    if (!voiceSupported || !voiceManagerRef.current) {
+      toast.error('Advanced voice mode is not supported in this browser')
+      return
+    }
+    const next = !voiceModeEnabled
+    setVoiceModeEnabled(next)
+    setCanResumeAssistantSpeech(false)
+    if (next) {
+      voiceManagerRef.current.startListening()
+      setVoiceStatusDetail('Mic hot: listening')
+      return
+    }
+    voiceManagerRef.current.stopListening()
+    voiceManagerRef.current.cancelSpeech()
+    setVoiceState('IDLE')
+    setVoiceStatusDetail('Voice mode is off')
+  }
+
+  const resumeAssistantSpeech = (): void => {
+    if (!lastAssistantSpeech.trim() || !voiceManagerRef.current) return
+    setCanResumeAssistantSpeech(false)
+    voiceManagerRef.current.speak(lastAssistantSpeech)
+  }
+
+  const openAdvancedVoicePage = (): void => {
+    navigate(`/jobs/${numericId}/interview-prep/voice`)
+  }
+
+  const closeAdvancedVoicePage = (): void => {
+    navigate(`/jobs/${numericId}/interview-prep`)
   }
 
   const releaseRecorder = (): void => {
@@ -313,12 +496,40 @@ export default function InterviewPrep() {
 
   useEffect(() => {
     return () => {
+      if (streamAbortRef.current) {
+        streamAbortRef.current.abort()
+        streamAbortRef.current = null
+      }
       if (mediaRecorderRef.current?.state === 'recording') {
         mediaRecorderRef.current.stop()
       }
       releaseRecorder()
     }
   }, [])
+
+  useEffect(() => {
+    if (!voiceManagerRef.current || !voiceSupported) return
+    if (isVoicePage) {
+      if (!activeSession || activeSession.status !== 'active') return
+      if (!voicePageAutoStartRef.current) {
+        voicePageAutoStartRef.current = true
+        if (!voiceModeEnabled) {
+          setVoiceModeEnabled(true)
+          voiceManagerRef.current.startListening()
+          setVoiceStatusDetail('Mic hot: listening')
+        }
+      }
+      return
+    }
+    voicePageAutoStartRef.current = false
+    if (voiceModeEnabled) {
+      voiceManagerRef.current.stopListening()
+      voiceManagerRef.current.cancelSpeech()
+      setVoiceModeEnabled(false)
+      setVoiceState('IDLE')
+      setVoiceStatusDetail('Voice mode is off')
+    }
+  }, [activeSession, isVoicePage, voiceModeEnabled, voiceSupported])
 
   const endInterview = async (): Promise<void> => {
     if (!activeSession || sending) return
@@ -378,6 +589,125 @@ export default function InterviewPrep() {
     sttStatusText = `Voice input error: ${sttError}`
   } else if (isRecorderSupported) {
     sttStatusText = 'Voice input: ready (fallback to text is always available).'
+  }
+
+  if (isVoicePage) {
+    return (
+      <div className="max-w-5xl mx-auto px-6 py-8 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={closeAdvancedVoicePage}
+            className="inline-flex items-center gap-2 text-sm text-text-secondary hover:text-text-primary"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back to Interview Chat
+          </button>
+          <button
+            type="button"
+            onClick={() => void endInterview()}
+            disabled={!activeSession || activeSession.status !== 'active' || sending}
+            className="rounded-lg border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 px-2.5 py-1.5 text-[11px] disabled:opacity-60"
+          >
+            <Square className="inline w-3 h-3 mr-1" />
+            End Interview
+          </button>
+        </div>
+
+        <div className="card p-6">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h1 className="text-lg font-semibold text-text-primary">Advanced Voice Interview</h1>
+              <p className="text-xs text-text-secondary mt-1">
+                {job?.title || 'Role'} at {job?.company || 'Company'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`rounded-full border px-2 py-0.5 text-[11px] ${
+                  ttsEngineBadge === 'kokoro'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-amber-200 bg-amber-50 text-amber-700'
+                }`}
+              >
+                {ttsEngineBadge === 'kokoro' ? 'Kokoro local' : 'Native fallback'}
+              </span>
+              <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-text-secondary">
+                {voiceState}
+              </span>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-border bg-[#fbfbfa] p-6 text-center mb-4">
+            <div className="w-28 h-28 mx-auto rounded-full bg-blue-600/90 text-white flex items-center justify-center shadow-lg mb-3">
+              <Radio className="w-8 h-8" />
+            </div>
+            <p className="text-sm font-medium text-text-primary">{voiceStatusDetail}</p>
+            {ttsStatusMessage ? <p className="text-[11px] text-text-muted mt-1">{ttsStatusMessage}</p> : null}
+            <p className="text-[11px] text-text-muted mt-1">Interrupt anytime by speaking</p>
+          </div>
+
+          <div className="rounded-xl border border-border bg-white p-3 mb-4">
+            <p className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Latest Assistant</p>
+            <p className="text-sm text-text-primary whitespace-pre-wrap">
+              {streamingText
+                || lastAssistantSpeech
+                || activeSession?.turns?.filter((turn) => turn.speaker === 'assistant').slice(-1)[0]?.content
+                || 'Waiting for interviewer…'}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <button
+              type="button"
+              onClick={() => toggleVoiceMode()}
+              disabled={!activeSession || activeSession.status !== 'active'}
+              className={`h-9 px-3 text-xs rounded-lg border disabled:opacity-60 ${
+                voiceModeEnabled
+                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                  : 'border-border bg-surface-secondary text-text-primary hover:bg-surface'
+              }`}
+            >
+              {voiceModeEnabled ? 'Stop Voice Mode' : 'Start Voice Mode'}
+            </button>
+            <button
+              type="button"
+              onClick={() => resumeAssistantSpeech()}
+              disabled={!canResumeAssistantSpeech || !voiceModeEnabled}
+              className="h-9 px-3 text-xs rounded-lg border border-border bg-surface-secondary text-text-primary hover:bg-surface disabled:opacity-60"
+            >
+              <Volume2 className="inline w-3 h-3 mr-1" />
+              Resume Last Statement
+            </button>
+          </div>
+
+          <div className="flex gap-2 items-end">
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              className="field-input flex-1 min-h-[52px] max-h-40 resize-y"
+              placeholder={activeSession?.status === 'active' ? 'Write your answer…' : 'Interview is complete'}
+              disabled={!activeSession || activeSession.status !== 'active' || sending}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  void sendMessage()
+                }
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => void sendMessage()}
+              disabled={!draft.trim() || !activeSession || activeSession.status !== 'active' || sending}
+              className="btn-primary h-10 py-1.5 px-3 text-xs disabled:opacity-60"
+            >
+              {sending ? <Loader2 className="inline w-3 h-3 mr-1 animate-spin" /> : <MessageCircle className="inline w-3 h-3 mr-1" />}
+              Send
+            </button>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -579,6 +909,20 @@ export default function InterviewPrep() {
               </div>
 
               <div className="border-t border-border p-3 bg-white">
+                <div className="mb-2 rounded-xl border border-border bg-[#fbfbfa] px-3 py-2 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-xs text-text-secondary">
+                    <Radio className="w-3.5 h-3.5 text-text-muted" />
+                    <span className="font-medium text-text-primary">Advanced Voice Mode</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={openAdvancedVoicePage}
+                    disabled={activeSession.status !== 'active'}
+                    className="h-8 px-2.5 text-[11px] rounded-lg border border-border bg-surface-secondary text-text-primary hover:bg-surface disabled:opacity-60"
+                  >
+                    Open Full Voice Page
+                  </button>
+                </div>
                 <div className="flex gap-2 items-end">
                   <textarea
                     value={draft}

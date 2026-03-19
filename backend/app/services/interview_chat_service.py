@@ -14,14 +14,36 @@ from ..models.interview_chat import InterviewChatSession, InterviewChatTurn
 from ..models.interview_research import InterviewResearchSession
 from ..models.score import Job
 from .interview_docs import fetch_context_from_interview_documents
-from .llm import generate_adaptive_interview_question, generate_embedding
+from .llm import (
+    classify_interview_answer_vagueness,
+    classify_interview_repeat_intent,
+    generate_adaptive_interview_question,
+    generate_embedding,
+)
 from .scoring_orchestrator import execute_scoring_orchestrator
 
 logger = logging.getLogger(__name__)
 
 QUESTION_ORDER = ["behavioral", "technical", "system_design", "company_specific"]
 QUESTION_TARGETS = {"behavioral": 3, "technical": 4, "system_design": 2, "company_specific": 2}
-VAGUE_MARKERS = {"not sure", "don't know", "idk", "maybe", "kind of", "sort of", "i think", "probably"}
+SPECIFIC_CONTEXT_TERMS = {
+    "api",
+    "queue",
+    "pipeline",
+    "schema",
+    "latency",
+    "throughput",
+    "incident",
+    "sla",
+    "slo",
+    "audit",
+    "compliance",
+    "rollback",
+    "validation",
+    "monitoring",
+    "ingestion",
+    "aggregation",
+}
 FOLLOW_UP_LIMIT = 5
 
 
@@ -327,11 +349,28 @@ def add_turn(
 
 def _is_vague_answer(message: str) -> bool:
     text = _single_line(message).lower()
+    words = re.findall(r"[a-z0-9+#.-]+", text)
+    word_count = len(words)
+    punctuation_count = len(re.findall(r"[.!?;,]", text))
+    unique_ratio = (len(set(words)) / word_count) if word_count else 0.0
+    has_specificity = any(term in text for term in SPECIFIC_CONTEXT_TERMS)
+
     if len(text) < 28:
         return True
     if len(_keyword_terms(text, limit=12)) <= 3:
         return True
-    return any(marker in text for marker in VAGUE_MARKERS)
+    if _has_measurable_outcome(text) and word_count >= 20:
+        return False
+    if not has_specificity and word_count >= 28 and punctuation_count == 0:
+        return True
+    if not has_specificity and word_count >= 30 and punctuation_count == 0 and len(_keyword_terms(text, limit=10)) < 7:
+        return True
+    # Detect long, run-on answers that stay generic and repetitive.
+    if word_count >= 40 and punctuation_count == 0 and not has_specificity:
+        return True
+    if word_count >= 36 and unique_ratio < 0.52 and not _has_measurable_outcome(text):
+        return True
+    return False
 
 
 def _has_measurable_outcome(message: str) -> bool:
@@ -860,10 +899,12 @@ def _should_end_interview(session: InterviewChatSession, metadata: dict[str, Any
     return weak_streak >= 2 or rolling < 45
 
 
-def _thread_followup_needed(thread: ThreadState, message: str) -> bool:
+def _thread_followup_needed(thread: ThreadState, message: str, *, is_vague: bool | None = None) -> bool:
     if thread["follow_up_count"] >= FOLLOW_UP_LIMIT:
         return False
-    if _is_vague_answer(message):
+    if is_vague is None:
+        is_vague = _is_vague_answer(message)
+    if is_vague:
         return True
     if thread["category"] in {"behavioral", "technical"} and not _has_measurable_outcome(message):
         return True
@@ -874,8 +915,15 @@ def _thread_followup_needed(thread: ThreadState, message: str) -> bool:
     return False
 
 
-def _thread_followup_prompt(thread: ThreadState, message: str) -> str:
-    if _is_vague_answer(message):
+def _thread_followup_prompt(thread: ThreadState, message: str, *, is_vague: bool | None = None) -> str:
+    if is_vague is None:
+        is_vague = _is_vague_answer(message)
+    if is_vague:
+        if thread["follow_up_count"] >= 1:
+            return (
+                "Let's make this concrete before we continue: pick one real project and answer in 4 lines - "
+                "context, what you personally changed, how you validated it, and one measurable outcome."
+            )
         return (
             f"Let's stay on {thread['category'].replace('_', ' ')} for a moment: "
             "give one concrete example with your actions, constraints, and measurable outcome."
@@ -889,6 +937,43 @@ def _thread_followup_prompt(thread: ThreadState, message: str) -> str:
         "One more detail before we move on: what measurable outcome did you drive "
         "(for example %, latency, throughput, cost, or incidents)?"
     )
+
+
+async def _classify_answer_clarity(thread: ThreadState, message: str) -> bool:
+    normalized = _single_line(message)
+    if not normalized:
+        return True
+    if _is_vague_answer(normalized):
+        return True
+    if _has_measurable_outcome(normalized):
+        return False
+    if len(_keyword_terms(normalized, limit=12)) >= 7 and len(re.findall(r"[.!?]", normalized)) >= 2:
+        return False
+    if len(normalized) > 240:
+        return False
+    try:
+        result = await classify_interview_answer_vagueness(
+            message=normalized,
+            current_question=thread["question"],
+            recent_assistant=thread["assistant_messages"],
+            recent_user=thread["user_messages"],
+        )
+        is_vague = bool(result.get("is_vague"))
+        confidence = float(result.get("confidence") or 0.0)
+        return is_vague and confidence >= 0.45
+    except Exception:
+        return False
+
+
+def _thread_repeat_or_clarify_prompt(thread: ThreadState, message: str) -> str:
+    lowered = _single_line(message).lower()
+    if any(token in lowered for token in ("rephrase", "clarify", "clearer", "what do you mean")):
+        return (
+            "Absolutely. Rephrased question: "
+            f"{thread['question']} "
+            "You can answer step-by-step and I can challenge specifics after."
+        )
+    return f"Sure — repeating the question: {thread['question']}"
 
 
 def _post_closing_acknowledgement(message: str) -> str:
@@ -998,10 +1083,30 @@ async def produce_assistant_reply(
         return
     if raw_message:
         thread["user_messages"].append(normalized_message or raw_message)
-    if raw_message and _thread_followup_needed(thread, normalized_message or raw_message):
+    if raw_message:
+        repeat_intent = await classify_interview_repeat_intent(
+            message=normalized_message or raw_message,
+            current_question=thread["question"],
+            recent_assistant=thread["assistant_messages"],
+            recent_user=thread["user_messages"],
+        )
+        if bool(repeat_intent.get("is_repeat_intent")):
+            repeat_reply = _thread_repeat_or_clarify_prompt(thread, normalized_message or raw_message)
+            thread["assistant_messages"].append(repeat_reply)
+            _store_thread(metadata, thread)
+            reply = AssistantReply(text=repeat_reply, turn_type="transition", tool_calls=[], context_sources=[])
+            async for chunk in _stream_assistant_reply(reply):
+                yield chunk
+            session.session_metadata = metadata
+            session.updated_at = datetime.utcnow()
+            return
+    needs_follow_up = False
+    if raw_message:
+        needs_follow_up = await _classify_answer_clarity(thread, normalized_message or raw_message)
+    if raw_message and _thread_followup_needed(thread, normalized_message or raw_message, is_vague=needs_follow_up):
         if thread["follow_up_count"] < int(metadata.get("thread_follow_up_limit") or FOLLOW_UP_LIMIT):
             context_sources, tool_calls = await build_context_tools(db, job=job, query=normalized_message or raw_message)
-            follow_up = _thread_followup_prompt(thread, normalized_message or raw_message)
+            follow_up = _thread_followup_prompt(thread, normalized_message or raw_message, is_vague=needs_follow_up)
             thread["follow_up_count"] += 1
             thread["assistant_messages"].append(follow_up)
             _store_thread(metadata, thread)

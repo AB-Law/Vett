@@ -16,6 +16,7 @@ import {
   updateUserProfile,
   type CandidateProfile,
 } from '../lib/api'
+import { TtsProviderRouter } from '../lib/voice/ttsProviderRouter'
 import toast from 'react-hot-toast'
 
 type Provider = 'claude' | 'openai' | 'azure_openai' | 'ollama' | 'lm_studio'
@@ -55,6 +56,8 @@ const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'lm_studio', label: 'LM Studio' },
 ]
 
+const VOICE_PREVIEW_TEXT = 'This is a preview of your interview voice settings.'
+
 export default function Settings() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [loading, setLoading] = useState(true)
@@ -77,7 +80,13 @@ export default function Settings() {
   })
   const [loadingCandidateProfile, setLoadingCandidateProfile] = useState(false)
   const [savingCandidateProfile, setSavingCandidateProfile] = useState(false)
+  const [voicePreviewStatus, setVoicePreviewStatus] = useState('')
+  const [previewingVoice, setPreviewingVoice] = useState(false)
   const documentsPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const previewRouterRef = useRef<TtsProviderRouter | null>(null)
+  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const previewAbortRef = useRef<AbortController | null>(null)
+  const skipInitialVoicePreviewRef = useRef(true)
 
   const progressPercent = useCallback((embeddedChunks: number, totalChunks: number): number => {
     if (totalChunks <= 0) return 0
@@ -174,6 +183,10 @@ export default function Settings() {
           ollama_model: s.ollama_model,
           lm_studio_base_url: s.lm_studio_base_url,
           lm_studio_model: s.lm_studio_model,
+          tts_provider: s.tts_provider || 'kokoro',
+          voice_preferred_name: s.voice_preferred_name || '',
+          voice_rate: String(s.voice_rate ?? 1),
+          voice_pitch: String(s.voice_pitch ?? 1),
         })
         setEmbeddingProgress(ep)
         setInterviewDocuments(mappedDocs)
@@ -196,10 +209,71 @@ export default function Settings() {
     }
   }, [])
 
+  useEffect(() => {
+    previewRouterRef.current = new TtsProviderRouter({
+      onStatus: (event) => setVoicePreviewStatus(event.message),
+    })
+    return () => {
+      if (previewTimerRef.current) clearTimeout(previewTimerRef.current)
+      if (previewAbortRef.current) previewAbortRef.current.abort()
+      previewRouterRef.current?.dispose()
+      previewRouterRef.current = null
+    }
+  }, [])
+
   const set = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }))
   const setProfileField = useCallback((key: keyof CandidateProfileForm, value: string) => {
     setCandidateProfile((previous) => ({ ...previous, [key]: value }))
   }, [])
+
+  const playVoicePreview = useCallback(async (overrides?: Partial<Record<string, string>>) => {
+    const router = previewRouterRef.current
+    if (!router) return
+    const ttsProvider = (overrides?.tts_provider ?? fields.tts_provider ?? 'kokoro') as 'native' | 'kokoro'
+    const preferredVoiceName = overrides?.voice_preferred_name ?? fields.voice_preferred_name ?? ''
+    const rate = Number(overrides?.voice_rate ?? fields.voice_rate ?? '1')
+    const pitch = Number(overrides?.voice_pitch ?? fields.voice_pitch ?? '1')
+
+    router.setPreferredProvider(ttsProvider)
+    if (previewAbortRef.current) previewAbortRef.current.abort()
+    const controller = new AbortController()
+    previewAbortRef.current = controller
+    setPreviewingVoice(true)
+    setVoicePreviewStatus('Playing voice preview...')
+    try {
+      await router.speakChunk(VOICE_PREVIEW_TEXT, {
+        preferredVoiceName,
+        rate: Number.isFinite(rate) ? rate : 1,
+        pitch: Number.isFinite(pitch) ? pitch : 1,
+        kokoroSpeed: Number.isFinite(rate) ? rate : 1,
+        signal: controller.signal,
+      })
+      setVoicePreviewStatus('')
+    } catch (error: unknown) {
+      const isAbort = error instanceof DOMException && error.name === 'AbortError'
+      if (!isAbort) {
+        setVoicePreviewStatus('Voice preview unavailable')
+      }
+    } finally {
+      setPreviewingVoice(false)
+    }
+  }, [fields.tts_provider, fields.voice_pitch, fields.voice_preferred_name, fields.voice_rate])
+
+  const scheduleVoicePreview = useCallback((overrides?: Partial<Record<string, string>>) => {
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current)
+    previewTimerRef.current = setTimeout(() => {
+      void playVoicePreview(overrides)
+    }, 280)
+  }, [playVoicePreview])
+
+  useEffect(() => {
+    if (loading) return
+    if (skipInitialVoicePreviewRef.current) {
+      skipInitialVoicePreviewRef.current = false
+      return
+    }
+    scheduleVoicePreview()
+  }, [fields.tts_provider, fields.voice_preferred_name, fields.voice_rate, fields.voice_pitch, loading, scheduleVoicePreview])
 
   const toCandidateProfileForm = useCallback((profile: CandidateProfile): CandidateProfileForm => ({
     full_name: profile.full_name || '',
@@ -491,6 +565,72 @@ export default function Settings() {
             <option value="markdown">Markdown</option>
             <option value="pdf">PDF</option>
           </select>
+        </div>
+        <div className="border-t border-border pt-3 mt-3">
+          <label className="label">Voice provider</label>
+          <select
+            className="input max-w-xs"
+            value={fields.tts_provider || 'kokoro'}
+            onChange={(e) => set('tts_provider', e.target.value)}
+          >
+            <option value="kokoro">Kokoro (local, recommended)</option>
+            <option value="native">Browser native voice</option>
+          </select>
+          <p className="text-[11px] text-text-muted mt-1">
+            Kokoro runs fully local in your browser. If unsupported, advanced voice auto-falls back to native speech.
+          </p>
+        </div>
+        <div className="border-t border-border pt-3 mt-3">
+          <label className="label">Preferred voice name (optional)</label>
+          <input
+            className="input max-w-md"
+            value={fields.voice_preferred_name || ''}
+            onChange={(e) => set('voice_preferred_name', e.target.value)}
+            placeholder="e.g. Samantha, Alex, Google US English"
+          />
+          <p className="text-[11px] text-text-muted mt-1">
+            Used by browser-native voice mode (and fallback mode) to pick the closest available system voice.
+          </p>
+        </div>
+        <div className="border-t border-border pt-3 mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="label">Voice rate ({Number(fields.voice_rate || 1).toFixed(1)}x)</label>
+            <input
+              type="range"
+              min="0.7"
+              max="1.3"
+              step="0.1"
+              className="w-full"
+              value={fields.voice_rate || '1'}
+              onChange={(e) => set('voice_rate', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="label">Voice pitch ({Number(fields.voice_pitch || 1).toFixed(1)})</label>
+            <input
+              type="range"
+              min="0.8"
+              max="1.2"
+              step="0.1"
+              className="w-full"
+              value={fields.voice_pitch || '1'}
+              onChange={(e) => set('voice_pitch', e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="border-t border-border pt-3 mt-3 flex items-center justify-between gap-3">
+          <p className="text-[11px] text-text-muted">
+            {voicePreviewStatus || 'Change provider, voice, rate, or pitch to hear a voice preview.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => void playVoicePreview()}
+            className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-60"
+            disabled={previewingVoice}
+          >
+            {previewingVoice ? <Loader2 className="inline w-3 h-3 mr-1 animate-spin" /> : null}
+            Preview voice
+          </button>
         </div>
       </div>
 

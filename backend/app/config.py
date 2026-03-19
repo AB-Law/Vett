@@ -31,6 +31,10 @@ class Settings(BaseSettings):
 
     save_history: bool = True
     default_export_format: str = "json"
+    tts_provider: str = "kokoro"
+    voice_preferred_name: str = ""
+    voice_rate: float = 1.0
+    voice_pitch: float = 1.0
 
     # Research infra (self-hosted SearXNG)
     searxng_enabled: bool = True

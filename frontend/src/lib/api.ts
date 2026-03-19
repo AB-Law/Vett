@@ -204,6 +204,10 @@ export interface AppSettings {
   lm_studio_model: string
   save_history: boolean
   default_export_format: string
+  tts_provider: 'native' | 'kokoro'
+  voice_preferred_name: string
+  voice_rate: number
+  voice_pitch: number
   has_anthropic_key: boolean
   has_openai_key: boolean
   has_azure_key: boolean
@@ -443,11 +447,13 @@ export const streamInterviewChatTurn = async (
   sessionId: string,
   message: string | null,
   onToken: (token: string) => void,
+  options?: { signal?: AbortSignal },
 ): Promise<InterviewChatStreamResult> => {
   const response = await fetch(`/api/interview-chat/jobs/${jobId}/sessions/${sessionId}/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
+    signal: options?.signal,
   })
   if (!response.ok || !response.body) {
     throw new Error(`Interview stream failed (${response.status})`)

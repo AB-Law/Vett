@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
 import os
 import re
 import logging
@@ -63,6 +63,10 @@ class LLMSettings(BaseModel):
     # General
     save_history: Optional[bool] = None
     default_export_format: Optional[str] = None
+    tts_provider: Optional[Literal["native", "kokoro"]] = None
+    voice_preferred_name: Optional[str] = None
+    voice_rate: Optional[float] = None
+    voice_pitch: Optional[float] = None
 
 
 class SettingsResponse(BaseModel):
@@ -78,6 +82,10 @@ class SettingsResponse(BaseModel):
     lm_studio_model: str
     save_history: bool
     default_export_format: str
+    tts_provider: Literal["native", "kokoro"]
+    voice_preferred_name: str
+    voice_rate: float
+    voice_pitch: float
     # Masked keys – presence indicator only
     has_anthropic_key: bool
     has_openai_key: bool
@@ -169,6 +177,10 @@ def get_settings_endpoint():
         lm_studio_model=s.lm_studio_model,
         save_history=s.save_history,
         default_export_format=s.default_export_format,
+        tts_provider=s.tts_provider if s.tts_provider in {"native", "kokoro"} else "kokoro",
+        voice_preferred_name=s.voice_preferred_name,
+        voice_rate=s.voice_rate,
+        voice_pitch=s.voice_pitch,
         has_anthropic_key=bool(s.anthropic_api_key),
         has_openai_key=bool(s.openai_api_key),
         has_azure_key=bool(s.azure_openai_api_key),
@@ -210,6 +222,14 @@ def update_settings(payload: LLMSettings):
         updates["SAVE_HISTORY"] = "true" if payload.save_history else "false"
     if payload.default_export_format:
         updates["DEFAULT_EXPORT_FORMAT"] = payload.default_export_format
+    if payload.tts_provider is not None:
+        updates["TTS_PROVIDER"] = payload.tts_provider
+    if payload.voice_preferred_name is not None:
+        updates["VOICE_PREFERRED_NAME"] = payload.voice_preferred_name
+    if payload.voice_rate is not None:
+        updates["VOICE_RATE"] = str(payload.voice_rate)
+    if payload.voice_pitch is not None:
+        updates["VOICE_PITCH"] = str(payload.voice_pitch)
 
     _patch_env_file(updates)
 
