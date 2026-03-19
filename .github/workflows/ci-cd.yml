@@ -93,6 +93,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Normalize registry namespace to lowercase
+        id: image_namespace
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Build and publish backend image
         uses: docker/build-push-action@v6
         with:
@@ -100,8 +105,8 @@ jobs:
           file: ./backend/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/vett-backend:latest
-            ghcr.io/${{ github.repository_owner }}/vett-backend:${{ github.sha }}
+            ghcr.io/${{ steps.image_namespace.outputs.owner }}/vett-backend:latest
+            ghcr.io/${{ steps.image_namespace.outputs.owner }}/vett-backend:${{ github.sha }}
 
       - name: Build and publish frontend image
         uses: docker/build-push-action@v6
@@ -110,5 +115,5 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/vett-frontend:latest
-            ghcr.io/${{ github.repository_owner }}/vett-frontend:${{ github.sha }}
+            ghcr.io/${{ steps.image_namespace.outputs.owner }}/vett-frontend:latest
+            ghcr.io/${{ steps.image_namespace.outputs.owner }}/vett-frontend:${{ github.sha }}
