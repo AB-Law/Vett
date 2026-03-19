@@ -15,11 +15,30 @@ from ..models.interview_research import InterviewResearchSession
 from ..models.score import Job
 from .interview_docs import fetch_context_from_interview_documents
 from .llm import (
-    classify_interview_answer_vagueness,
     classify_interview_repeat_intent,
     generate_adaptive_interview_question,
     generate_embedding,
 )
+
+try:
+    from .llm import classify_interview_answer_vagueness
+except ImportError:
+    # Backward-compatible fallback for environments running a prior llm.py revision.
+    async def classify_interview_answer_vagueness(
+        *,
+        message: str,
+        current_question: str,
+        recent_assistant: list[str] | None = None,
+        recent_user: list[str] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "is_vague": _is_vague_answer(message),
+            "reason": "legacy_fallback",
+            "confidence": 0.95,
+            "current_question": current_question,
+            "recent_assistant": list(recent_assistant or []),
+            "recent_user": list(recent_user or []),
+        }
 from .scoring_orchestrator import execute_scoring_orchestrator
 
 logger = logging.getLogger(__name__)
