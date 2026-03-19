@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Iterable
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from ..models.interview import InterviewKnowledgeDocument
@@ -158,6 +159,7 @@ def fetch_context_from_interview_documents(
     query_vector: list[float],
     *,
     job_id: int | None,
+    document_ids: list[int] | None = None,
     scope_limit: int = 6,
     scope_overlap: int = 2,
 ) -> list[dict[str, str]]:
@@ -170,12 +172,16 @@ def fetch_context_from_interview_documents(
         "job_id": int(job_id or 0),
         "scope_limit": int(scope_limit),
         "vector_literal": vector_literal,
+        "document_ids": [int(doc_id) for doc_id in (document_ids or []) if int(doc_id) > 0],
     }
     if job_id:
         job_filter = "(pq.scope_type = 'global' OR (pq.scope_type = 'job' AND pq.scope_job_id = :job_id))"
 
-    rows = db.execute(
-        text(
+    document_filter_sql = ""
+    if parameters["document_ids"]:
+        document_filter_sql = " AND pq.source_id IN :document_ids"
+
+    statement = text(
             """
             SELECT pq.id, pq.source_id, pq.source_window
             FROM practice_questions pq
@@ -185,11 +191,17 @@ def fetch_context_from_interview_documents(
               AND ("""
             + job_filter
             + ")"
+            + document_filter_sql
             + """
             ORDER BY pq.embedding <=> CAST(:vector_literal AS vector)
             LIMIT :scope_limit
             """
-        ),
+    )
+    if parameters["document_ids"]:
+        statement = statement.bindparams(bindparam("document_ids", expanding=True))
+
+    rows = db.execute(
+        statement,
         {
             **parameters,
             "source_table": DOC_TABLE_NAME,
@@ -228,6 +240,58 @@ def fetch_context_from_interview_documents(
             break
 
     return contexts[:scope_limit]
+
+
+def _is_heading_line(line: str) -> bool:
+    text_value = (line or "").strip()
+    if not text_value or len(text_value) > 140:
+        return False
+    if text_value.lower().startswith(("http://", "https://")):
+        return False
+    if text_value.endswith((".", "?", "!")):
+        return False
+    if re.match(r"^\d+(\.\d+)*[\)\.: -].+", text_value):
+        return True
+    if re.match(r"^(chapter|section|part)\s+\d+[\s:\.-]", text_value, flags=re.IGNORECASE):
+        return True
+    alpha_count = sum(1 for char in text_value if char.isalpha())
+    upper_count = sum(1 for char in text_value if char.isupper())
+    if alpha_count >= 4 and upper_count / max(1, alpha_count) > 0.8:
+        return True
+    words = text_value.split()
+    if 1 <= len(words) <= 8 and text_value == text_value.title():
+        return True
+    return False
+
+
+def split_document_into_sections(text: str) -> list[dict[str, str]]:
+    raw_text = (text or "").strip()
+    if not raw_text:
+        return []
+
+    lines = [line.rstrip() for line in raw_text.splitlines()]
+    sections: list[dict[str, str]] = []
+    current_title = "Overview"
+    current_lines: list[str] = []
+
+    def _flush_section() -> None:
+        body = "\n".join(current_lines).strip()
+        if body:
+            sections.append({"title": current_title, "text": body})
+
+    for line in lines:
+        stripped = line.strip()
+        if _is_heading_line(stripped):
+            _flush_section()
+            current_title = stripped[:120]
+            current_lines = []
+            continue
+        current_lines.append(line)
+
+    _flush_section()
+    if not sections:
+        return [{"title": "Overview", "text": raw_text}]
+    return sections
 
 
 def serialize_docs_for_response(documents: Iterable[InterviewKnowledgeDocument]) -> list[dict[str, object]]:

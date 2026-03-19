@@ -11,7 +11,7 @@ sa_text = text
 from sqlalchemy.exc import OperationalError
 
 from .database import Base, SessionLocal, engine
-from .models import cv, interview_chat, practice, score, user_profile  # noqa: F401 - register models
+from .models import cv, interview_chat, practice, score, study, user_profile  # noqa: F401 - register models
 from .routers import cv as cv_router
 from .routers import score as score_router
 from .routers import settings as settings_router
@@ -20,6 +20,7 @@ from .routers import jobs as jobs_router
 from .routers import practice as practice_router
 from .routers import interview_chat as interview_chat_router
 from .routers import local_context as local_context_router
+from .routers import study as study_router
 from .services.practice_embedder import run_embedding_worker
 
 logger = logging.getLogger(__name__)
@@ -529,6 +530,63 @@ def _ensure_pgvector_index() -> None:
         ))
 
 
+def _ensure_study_card_sets_columns() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "study_card_sets" not in table_names:
+        return
+
+    with engine.begin() as connection:
+        existing_columns = {column["name"]: column for column in inspector.get_columns("study_card_sets")}
+        if "name" not in existing_columns:
+            connection.execute(text('ALTER TABLE "study_card_sets" ADD COLUMN "name" VARCHAR(255);'))
+            connection.execute(text("UPDATE study_card_sets SET name = 'Untitled deck' WHERE name IS NULL OR name = '';"))
+        if "parent_card_set_id" not in existing_columns:
+            connection.execute(text('ALTER TABLE "study_card_sets" ADD COLUMN "parent_card_set_id" INTEGER;'))
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_study_card_sets_parent_card_set_id" '
+                'ON "study_card_sets" ("parent_card_set_id");'
+            )
+        )
+        job_id_column = existing_columns.get("job_id")
+        if job_id_column and not job_id_column.get("nullable", True):
+            # Required for standalone Study Hub sets that are not tied to a job.
+            connection.execute(text('ALTER TABLE "study_card_sets" ALTER COLUMN "job_id" DROP NOT NULL;'))
+
+        if "study_card_set_documents" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS study_card_set_documents (
+                      id INTEGER PRIMARY KEY,
+                      card_set_id INTEGER NOT NULL REFERENCES study_card_sets(id) ON DELETE CASCADE,
+                      document_id INTEGER NOT NULL REFERENCES interview_knowledge_documents(id),
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+            )
+        connection.execute(
+            text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_study_card_set_document" '
+                'ON "study_card_set_documents" ("card_set_id", "document_id");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_study_card_set_documents_card_set_id" '
+                'ON "study_card_set_documents" ("card_set_id");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_study_card_set_documents_document_id" '
+                'ON "study_card_set_documents" ("document_id");'
+            )
+        )
+
+
 def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_seconds: float = 1.0) -> None:
     for attempt in range(1, max_attempts + 1):
         try:
@@ -545,6 +603,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_interview_research_sessions_table()
             _ensure_interview_chat_sessions_table()
             _ensure_interview_chat_turns_uniqueness()
+            _ensure_study_card_sets_columns()
             _ensure_pgvector_index()
             logger.info("Database connected and schema initialized.")
             return
@@ -585,6 +644,7 @@ app.include_router(jobs_router.router, prefix="/api")
 app.include_router(practice_router.router, prefix="/api")
 app.include_router(interview_chat_router.router, prefix="/api")
 app.include_router(local_context_router.router, prefix="/api")
+app.include_router(study_router.router, prefix="/api")
 
 
 @app.on_event("startup")

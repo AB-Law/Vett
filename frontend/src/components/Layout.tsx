@@ -7,6 +7,7 @@ import {
   Settings,
   Wifi,
   TrendingUp,
+  BookOpen,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
@@ -15,6 +16,7 @@ const navItems = [
   { to: '/cv', icon: FileText, label: 'My CV' },
   { to: '/score', icon: ClipboardCheck, label: 'Score JD' },
   { to: '/jobs', icon: Briefcase, label: 'Jobs' },
+  { to: '/study', icon: BookOpen, label: 'Study Hub' },
 ]
 
 export default function Layout() {
