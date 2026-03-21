@@ -184,20 +184,36 @@ function SourcesAccordion({
       </button>
       {open && (
         <div className="divide-y divide-border">
-          {sources.map((src) => (
-            <div
-              key={src.index}
-              className={`px-3 py-2 space-y-1 transition-colors ${highlightIndex === src.index ? 'bg-accent/10' : ''}`}
-            >
-              <div className="flex items-center gap-1.5">
-                <span className="inline-flex items-center justify-center w-4 h-4 rounded text-[9px] font-bold bg-accent/20 text-accent shrink-0">
-                  {src.index}
-                </span>
-                <span className="font-medium text-text-primary truncate">{src.filename}</span>
+          {sources.map((src) => {
+            const pdfUrl = src.doc_id
+              ? `/api/interview-documents/${src.doc_id}/file${src.page_number ? `#page=${src.page_number}` : ''}`
+              : null
+            return (
+              <div
+                key={src.index}
+                className={`px-3 py-2 space-y-1 transition-colors ${highlightIndex === src.index ? 'bg-accent/10' : ''}`}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="inline-flex items-center justify-center w-4 h-4 rounded text-[9px] font-bold bg-accent/20 text-accent shrink-0">
+                    {src.index}
+                  </span>
+                  {pdfUrl ? (
+                    <a
+                      href={pdfUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium text-accent hover:underline truncate"
+                    >
+                      {src.filename}{src.page_number ? ` · p.${src.page_number}` : ''}
+                    </a>
+                  ) : (
+                    <span className="font-medium text-text-primary truncate">{src.filename}</span>
+                  )}
+                </div>
+                <p className="text-text-muted leading-relaxed line-clamp-3">{src.snippet}</p>
               </div>
-              <p className="text-text-muted leading-relaxed line-clamp-3">{src.snippet}</p>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>

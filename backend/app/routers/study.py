@@ -159,6 +159,8 @@ class MindMapNodeSource(BaseModel):
     index: int
     filename: str
     snippet: str
+    doc_id: int | None = None
+    page_number: int | None = None
 
 
 class MindMapNodeInfoResponse(BaseModel):

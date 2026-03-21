@@ -775,6 +775,8 @@ export interface MindMapNodeSource {
   index: number
   filename: string
   snippet: string
+  doc_id: number | null
+  page_number: number | null
 }
 
 export interface MindMapNodeInfoResponse {

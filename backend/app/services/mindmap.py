@@ -18,6 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - test/runtime parity
 
 from ..database import SessionLocal
 from ..models.interview import InterviewKnowledgeDocument
+from ..models.practice import PracticeQuestion
 from ..models.score import Job
 from ..models.study import MindMap, MindMapJob, MindMapNodeInfo
 from . import interview_docs, llm as llm_service
@@ -408,19 +409,42 @@ def get_cached_mind_map(
 # ── New async job-based mind map functions ────────────────────────────────────
 
 
+def _build_chunk_page_map(db: Session, document_id: int) -> dict[int, int | None]:
+    """Return {chunk_index: page_number} for a document's embedded chunks."""
+    rows = (
+        db.query(PracticeQuestion.source_window, PracticeQuestion.chunk_page)
+        .filter(
+            PracticeQuestion.source_table == interview_docs.DOC_TABLE_NAME,
+            PracticeQuestion.source_id == document_id,
+        )
+        .all()
+    )
+    result: dict[int, int | None] = {}
+    for sw, cp in rows:
+        idx = interview_docs.chunk_index_from_source_window(sw)
+        if idx is not None:
+            result[idx] = cp
+    return result
+
+
 def _collect_all_contexts(db: Session, *, job_id: int, doc_id: int | None) -> list[dict[str, str]]:
     selected_docs = _eligible_job_documents(db, job_id=job_id, doc_id=doc_id)
     if not selected_docs:
         raise ValueError("No interview documents available for this selection.")
     contexts: list[dict[str, str]] = []
-    if doc_id is not None:
-        document = selected_docs[0]
+    docs_to_process = [selected_docs[0]] if doc_id is not None else selected_docs
+    for document in docs_to_process:
+        chunk_page_map = _build_chunk_page_map(db, document.id)
         for index, snippet in enumerate(interview_docs.chunk_interview_text(document.parsed_text)):
-            contexts.append({"filename": document.source_filename, "snippet": snippet, "chunk_id": f"{document.id}:chunk:{index}"})
-    else:
-        for document in selected_docs:
-            for index, snippet in enumerate(interview_docs.chunk_interview_text(document.parsed_text)):
-                contexts.append({"filename": document.source_filename, "snippet": snippet, "chunk_id": f"{document.id}:chunk:{index}"})
+            page_num = chunk_page_map.get(index)
+            ctx: dict[str, str] = {
+                "filename": document.source_filename or "",
+                "snippet": snippet,
+                "chunk_id": f"{document.id}:chunk:{index}",
+                "doc_id": str(document.id),
+                "page_number": str(page_num) if page_num is not None else "",
+            }
+            contexts.append(ctx)
     if not contexts:
         raise ValueError("No interview document content available for mind map extraction.")
     return contexts
@@ -713,7 +737,13 @@ async def _generate_node_info_llm(node_label: str, source_contexts: list[dict[st
     model, kwargs = llm_service._get_litellm_model()  # type: ignore[attr-defined]
 
     sources: list[dict[str, object]] = [
-        {"index": i, "filename": ctx.get("filename", f"document-{i}"), "snippet": ctx.get("snippet", "")[:400]}
+        {
+            "index": i,
+            "filename": ctx.get("filename", f"document-{i}"),
+            "snippet": ctx.get("snippet", "")[:400],
+            "doc_id": int(ctx["doc_id"]) if ctx.get("doc_id") else None,
+            "page_number": int(ctx["page_number"]) if ctx.get("page_number") else None,
+        }
         for i, ctx in enumerate(source_contexts, start=1)
     ]
 
@@ -789,7 +819,13 @@ async def _generate_chat_answer(message: str, contexts: list[dict[str, str]]) ->
     model, kwargs = llm_service._get_litellm_model()  # type: ignore[attr-defined]
 
     sources: list[dict[str, object]] = [
-        {"index": i, "filename": ctx.get("filename", f"document-{i}"), "snippet": ctx.get("snippet", "")[:400]}
+        {
+            "index": i,
+            "filename": ctx.get("filename", f"document-{i}"),
+            "snippet": ctx.get("snippet", "")[:400],
+            "doc_id": int(ctx["doc_id"]) if ctx.get("doc_id") else None,
+            "page_number": int(ctx["page_number"]) if ctx.get("page_number") else None,
+        }
         for i, ctx in enumerate(contexts, start=1)
     ]
 

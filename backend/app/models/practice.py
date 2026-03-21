@@ -29,6 +29,7 @@ class PracticeQuestion(Base):
     source_table = Column(String(64), index=True)
     source_id = Column(Integer, ForeignKey("interview_knowledge_documents.id"), index=True)
     source_window = Column(String(64), index=True)
+    chunk_page = Column(Integer, nullable=True)  # 1-based PDF page number
 
 
 class QuestionCompany(Base):

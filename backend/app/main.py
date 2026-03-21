@@ -686,6 +686,20 @@ def _ensure_mindmap_job_tables() -> None:
         )
 
 
+def _ensure_document_and_chunk_columns() -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        if "interview_knowledge_documents" in tables:
+            existing = {col["name"] for col in inspector.get_columns("interview_knowledge_documents")}
+            if "file_path" not in existing:
+                connection.execute(text("ALTER TABLE interview_knowledge_documents ADD COLUMN file_path VARCHAR(512) NULL;"))
+        if "practice_questions" in tables:
+            existing = {col["name"] for col in inspector.get_columns("practice_questions")}
+            if "chunk_page" not in existing:
+                connection.execute(text("ALTER TABLE practice_questions ADD COLUMN chunk_page INTEGER NULL;"))
+
+
 def _ensure_mindmap_node_info_columns() -> None:
     inspector = inspect(engine)
     if "mind_map_node_infos" not in set(inspector.get_table_names()):
@@ -728,6 +742,7 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_study_card_sets_columns()
             _ensure_mind_maps_table()
             _ensure_mindmap_job_tables()
+            _ensure_document_and_chunk_columns()
             _ensure_mindmap_node_info_columns()
             _ensure_pgvector_index()
             _reset_stuck_mindmap_jobs()
