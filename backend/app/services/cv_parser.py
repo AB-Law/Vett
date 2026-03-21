@@ -29,6 +29,49 @@ _CONTINUATION_START_WORDS = {
     "which",
 }
 
+def parse_cv_with_pages(file_bytes: bytes, filename: str) -> tuple[str, list[int]]:
+    """Parse a document and return (text, page_start_word_indices).
+
+    page_start_word_indices[i] is the cumulative word offset where page i+1 begins.
+    For non-PDF files returns [0] since there are no page boundaries.
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf":
+        try:
+            return _parse_pdf_with_pages(file_bytes)
+        except Exception:
+            pass
+    text = parse_cv(file_bytes, filename)
+    return text, [0]
+
+
+def _parse_pdf_with_pages(data: bytes) -> tuple[str, list[int]]:
+    """Extract text per page via PyMuPDF and return cumulative word-offset boundaries."""
+    try:
+        import fitz
+    except ImportError as exc:
+        raise ImportError("PyMuPDF is not installed") from exc
+
+    page_texts: list[str] = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        for page in doc:
+            page_texts.append(_normalise_extracted_text(page.get_text()))
+
+    page_start_word_indices: list[int] = []
+    word_count = 0
+    full_parts: list[str] = []
+    for page_text in page_texts:
+        page_start_word_indices.append(word_count)
+        word_count += len(page_text.split())
+        if page_text.strip():
+            full_parts.append(page_text)
+
+    full_text = "\n\n".join(full_parts).strip()
+    if not full_text:
+        raise ValueError("PyMuPDF produced no text")
+    return full_text, page_start_word_indices
+
+
 def parse_cv(file_bytes: bytes, filename: str) -> str:
     suffix = Path(filename).suffix.lower()
 

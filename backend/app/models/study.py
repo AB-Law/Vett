@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -49,3 +49,50 @@ class StudyCardSetDocument(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     card_set = relationship("StudyCardSet", back_populates="selected_documents")
+
+
+class MindMapJob(Base):
+    __tablename__ = "mind_map_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(String(64), nullable=False, unique=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), index=True, nullable=True)
+    doc_id = Column(Integer, ForeignKey("interview_knowledge_documents.id"), index=True, nullable=True)
+    status = Column(String(20), nullable=False, default="pending")  # pending | processing | done | failed
+    error = Column(Text, nullable=True)
+    graph_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    node_infos = relationship("MindMapNodeInfo", back_populates="mind_map_job", cascade="all, delete-orphan")
+
+
+class MindMapNodeInfo(Base):
+    __tablename__ = "mind_map_node_infos"
+    __table_args__ = (
+        UniqueConstraint("mind_map_job_id", "node_id", name="uq_mind_map_node_info"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    mind_map_job_id = Column(Integer, ForeignKey("mind_map_jobs.id", ondelete="CASCADE"), index=True, nullable=False)
+    node_id = Column(String(128), nullable=False)
+    encyclopedic = Column(Text, nullable=False)
+    interview_prep = Column(Text, nullable=False)
+    sources_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    mind_map_job = relationship("MindMapJob", back_populates="node_infos")
+
+
+class MindMap(Base):
+    __tablename__ = "mind_maps"
+    __table_args__ = (
+        UniqueConstraint("job_id", "doc_id", "content_hash", name="uq_mind_maps_job_doc_hash"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), index=True, nullable=False)
+    doc_id = Column(Integer, ForeignKey("interview_knowledge_documents.id"), index=True, nullable=True)
+    content_hash = Column(String(64), nullable=False, index=True)
+    graph_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

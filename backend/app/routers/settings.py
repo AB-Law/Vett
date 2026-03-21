@@ -2,6 +2,7 @@
 from pathlib import Path
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Literal, Optional
 import os
@@ -22,7 +23,7 @@ from ..models.practice import (
 )
 from ..models.interview import InterviewKnowledgeDocument
 from ..services.llm import test_connection
-from ..services.cv_parser import parse_cv
+from ..services.cv_parser import parse_cv, parse_cv_with_pages
 from ..services.interview_docs import (
     build_parser_signature,
     chunk_interview_text,
@@ -524,7 +525,7 @@ async def upload_global_interview_document(
     error_message: str | None = None
     try:
         parse_start = time.perf_counter()
-        parsed_text = parse_cv(data, filename)
+        parsed_text, _page_offsets = parse_cv_with_pages(data, filename)
         logger.info(
             "Global interview document parsed filename=%s parsed_chars=%s duration_ms=%.1f",
             filename,
@@ -569,6 +570,18 @@ async def upload_global_interview_document(
     db.add(document)
     db.commit()
     db.refresh(document)
+
+    # Persist the original file so it can be served back to the user
+    try:
+        upload_dir = Path(get_settings().upload_dir)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        file_path = upload_dir / f"doc_{document.id}{suffix}"
+        file_path.write_bytes(data)
+        document.file_path = str(file_path)
+        db.commit()
+    except Exception:
+        logger.exception("Failed to save file to disk for document id=%s", document.id)
+
     logger.info(
         "Global interview document persisted id=%s filename=%s status=%s duration_ms=%.1f",
         document.id,
@@ -577,6 +590,24 @@ async def upload_global_interview_document(
         (time.perf_counter() - start_ts) * 1000,
     )
     return _serialize_interview_document(document)
+
+
+@router.get("/interview-documents/{doc_id}/file")
+def serve_interview_document_file(
+    doc_id: int,
+    db: Annotated[Session, Depends(get_db)],
+):
+    document = db.query(InterviewKnowledgeDocument).filter(InterviewKnowledgeDocument.id == doc_id).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not document.file_path:
+        raise HTTPException(status_code=404, detail="File not stored for this document")
+    file_path = Path(document.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    suffix = file_path.suffix.lower()
+    media_type = "application/pdf" if suffix == ".pdf" else "application/octet-stream"
+    return FileResponse(str(file_path), media_type=media_type, filename=document.source_filename or file_path.name)
 
 
 @router.get("/interview-documents/progress", response_model=list[InterviewKnowledgeDocumentProgressResponse])

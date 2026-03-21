@@ -12,6 +12,7 @@ from sqlalchemy.exc import OperationalError
 
 from .database import Base, SessionLocal, engine
 from .models import cv, interview_chat, practice, score, study, user_profile  # noqa: F401 - register models
+from .models.study import MindMapJob, MindMapNodeInfo  # noqa: F401 - ensure new tables are in metadata
 from .routers import cv as cv_router
 from .routers import score as score_router
 from .routers import settings as settings_router
@@ -587,6 +588,141 @@ def _ensure_study_card_sets_columns() -> None:
         )
 
 
+def _ensure_mind_maps_table() -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        if "mind_maps" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS mind_maps (
+                      id INTEGER PRIMARY KEY,
+                      job_id INTEGER NOT NULL REFERENCES jobs(id),
+                      doc_id INTEGER NULL REFERENCES interview_knowledge_documents(id),
+                      content_hash VARCHAR(64) NOT NULL,
+                      graph_json JSON NOT NULL,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+            )
+        connection.execute(
+            text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_mind_maps_job_doc_hash" '
+                'ON "mind_maps" ("job_id", "doc_id", "content_hash");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_mind_maps_job_id" '
+                'ON "mind_maps" ("job_id");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_mind_maps_doc_id" '
+                'ON "mind_maps" ("doc_id");'
+            )
+        )
+        connection.execute(
+            text(
+                'CREATE INDEX IF NOT EXISTS "ix_mind_maps_content_hash" '
+                'ON "mind_maps" ("content_hash");'
+            )
+        )
+
+
+def _ensure_mindmap_job_tables() -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS mind_map_jobs (
+                  id SERIAL PRIMARY KEY,
+                  task_id VARCHAR(64) NOT NULL UNIQUE,
+                  job_id INTEGER NOT NULL REFERENCES jobs(id),
+                  doc_id INTEGER NULL REFERENCES interview_knowledge_documents(id),
+                  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                  error TEXT NULL,
+                  graph_json JSON NOT NULL DEFAULT '{}',
+                  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                """
+            )
+        )
+        connection.execute(
+            text('CREATE INDEX IF NOT EXISTS "ix_mind_map_jobs_task_id" ON "mind_map_jobs" ("task_id");')
+        )
+        connection.execute(
+            text('CREATE INDEX IF NOT EXISTS "ix_mind_map_jobs_job_id" ON "mind_map_jobs" ("job_id");')
+        )
+        connection.execute(
+            text('CREATE INDEX IF NOT EXISTS "ix_mind_map_jobs_doc_id" ON "mind_map_jobs" ("doc_id");')
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS mind_map_node_infos (
+                  id SERIAL PRIMARY KEY,
+                  mind_map_job_id INTEGER NOT NULL REFERENCES mind_map_jobs(id) ON DELETE CASCADE,
+                  node_id VARCHAR(128) NOT NULL,
+                  encyclopedic TEXT NOT NULL,
+                  interview_prep TEXT NOT NULL,
+                  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                """
+            )
+        )
+        connection.execute(
+            text('CREATE INDEX IF NOT EXISTS "ix_mind_map_node_infos_mind_map_job_id" ON "mind_map_node_infos" ("mind_map_job_id");')
+        )
+        connection.execute(
+            text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_mind_map_node_info" '
+                'ON "mind_map_node_infos" ("mind_map_job_id", "node_id");'
+            )
+        )
+
+
+def _ensure_document_and_chunk_columns() -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        if "interview_knowledge_documents" in tables:
+            existing = {col["name"] for col in inspector.get_columns("interview_knowledge_documents")}
+            if "file_path" not in existing:
+                connection.execute(text("ALTER TABLE interview_knowledge_documents ADD COLUMN file_path VARCHAR(512) NULL;"))
+        if "practice_questions" in tables:
+            existing = {col["name"] for col in inspector.get_columns("practice_questions")}
+            if "chunk_page" not in existing:
+                connection.execute(text("ALTER TABLE practice_questions ADD COLUMN chunk_page INTEGER NULL;"))
+
+
+def _ensure_mindmap_node_info_columns() -> None:
+    inspector = inspect(engine)
+    if "mind_map_node_infos" not in set(inspector.get_table_names()):
+        return
+    existing = {col["name"] for col in inspector.get_columns("mind_map_node_infos")}
+    with engine.begin() as connection:
+        if "sources_json" not in existing:
+            connection.execute(text("ALTER TABLE mind_map_node_infos ADD COLUMN sources_json JSON NULL;"))
+
+
+def _reset_stuck_mindmap_jobs() -> None:
+    """Reset any jobs left in 'processing' state from a previous crashed process."""
+    with engine.begin() as connection:
+        # Allow job_id to be NULL (global-docs-only generation needs no job)
+        connection.execute(text("ALTER TABLE mind_map_jobs ALTER COLUMN job_id DROP NOT NULL;"))
+        connection.execute(
+            text(
+                "UPDATE mind_map_jobs SET status = 'failed', error = 'Process restarted mid-job' "
+                "WHERE status IN ('pending', 'processing');"
+            )
+        )
+
+
 def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_seconds: float = 1.0) -> None:
     for attempt in range(1, max_attempts + 1):
         try:
@@ -604,7 +740,12 @@ def _wait_for_database_and_init_schema(max_attempts: int = 10, base_delay_second
             _ensure_interview_chat_sessions_table()
             _ensure_interview_chat_turns_uniqueness()
             _ensure_study_card_sets_columns()
+            _ensure_mind_maps_table()
+            _ensure_mindmap_job_tables()
+            _ensure_document_and_chunk_columns()
+            _ensure_mindmap_node_info_columns()
             _ensure_pgvector_index()
+            _reset_stuck_mindmap_jobs()
             logger.info("Database connected and schema initialized.")
             return
         except OperationalError as exc:

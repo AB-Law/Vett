@@ -24,6 +24,7 @@ class InterviewKnowledgeDocument(Base):
     embedded_chunks = Column(Integer, nullable=False, default=0, server_default="0")
     parsed_word_count = Column(Integer, nullable=False, default=0, server_default="0")
     chunk_coverage_ratio = Column(Float, nullable=False, default=0.0, server_default="0")
+    file_path = Column(String(512), nullable=True)
     created_by_user_id = Column(String(120))
     created_at = Column(DateTime(timezone=True), server_default=sql_func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=sql_func.now())
