@@ -92,6 +92,7 @@ def _build_document_row(
     document: InterviewKnowledgeDocument,
     chunk_index: int,
     source_window: str,
+    chunk_page: int | None = None,
 ) -> PracticeQuestion:
     scope_type = "global" if (document.owner_type or "global") == "global" else "job"
     return PracticeQuestion(
@@ -105,19 +106,37 @@ def _build_document_row(
         source_table=interview_docs.DOC_TABLE_NAME,
         source_id=document.id,
         source_window=source_window,
+        chunk_page=chunk_page,
     )
+
+
+def _get_page_word_offsets(document: InterviewKnowledgeDocument) -> list[int]:
+    """Read the stored file (if available) and return page word offsets for page-aware chunking."""
+    if not document.file_path:
+        return [0]
+    try:
+        from pathlib import Path
+        from .cv_parser import parse_cv_with_pages
+        file_bytes = Path(document.file_path).read_bytes()
+        _, page_offsets = parse_cv_with_pages(file_bytes, document.source_filename or "document.pdf")
+        return page_offsets or [0]
+    except Exception:
+        return [0]
 
 
 def _prepare_document_rows_for_embedding(
     db: Session,
     document: InterviewKnowledgeDocument,
 ) -> list[tuple[PracticeQuestion, str]]:
-    chunks = interview_docs.chunk_interview_text(document.parsed_text)
-    if not chunks:
+    page_offsets = _get_page_word_offsets(document)
+    chunks_with_pages = interview_docs.chunk_interview_text_with_pages(
+        document.parsed_text, page_offsets
+    )
+    if not chunks_with_pages:
         return []
 
     scoped_rows: list[tuple[PracticeQuestion, str]] = []
-    for chunk_index, chunk_text in enumerate(chunks):
+    for chunk_index, (chunk_text, chunk_page) in enumerate(chunks_with_pages):
         source_window = interview_docs.make_source_window(chunk_index)
         existing = (
             db.query(PracticeQuestion)
@@ -133,6 +152,7 @@ def _prepare_document_rows_for_embedding(
                 document=document,
                 chunk_index=chunk_index,
                 source_window=source_window,
+                chunk_page=chunk_page,
             )
             db.add(existing)
             db.flush()
@@ -140,6 +160,9 @@ def _prepare_document_rows_for_embedding(
             continue
         if existing.embedding is not None:
             continue
+        # Backfill page if missing
+        if existing.chunk_page is None:
+            existing.chunk_page = chunk_page
         scoped_rows.append((existing, chunk_text))
 
     return scoped_rows

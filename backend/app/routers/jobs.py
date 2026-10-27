@@ -29,7 +29,7 @@ from ..models.score import Job, RescoreRun, ScrapeRequest
 from ..models.interview_research import InterviewResearchSession
 from ..models.score import AGENT_STATE_COMPLETED, AGENT_STATE_FAILED
 from ..models.interview import InterviewKnowledgeDocument
-from ..services.cv_parser import parse_cv
+from ..services.cv_parser import parse_cv, parse_cv_with_pages
 from ..services.interview_docs import build_parser_signature, chunk_interview_text, chunk_integrity_stats
 
 logger = logging.getLogger(__name__)
@@ -1240,7 +1240,7 @@ async def upload_job_interview_document(
     error_message: str | None = None
     try:
         parse_start = time.perf_counter()
-        parsed_text = parse_cv(data, filename)
+        parsed_text, _page_offsets = parse_cv_with_pages(data, filename)
         logger.info(
             "Parsed job interview document job_id=%s filename=%s parsed_chars=%s duration_ms=%.1f",
             job_id,
@@ -1287,6 +1287,19 @@ async def upload_job_interview_document(
     db.add(document)
     db.commit()
     db.refresh(document)
+
+    # Persist the original file so it can be served back to the user
+    try:
+        from pathlib import Path
+        upload_dir = Path(get_settings().upload_dir)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        file_path = upload_dir / f"doc_{document.id}{suffix}"
+        file_path.write_bytes(data)
+        document.file_path = str(file_path)
+        db.commit()
+    except Exception:
+        logger.exception("Failed to save file to disk for document id=%s", document.id)
+
     logger.info(
         "Persisted job interview document job_id=%s document_id=%s status=%s duration_ms=%.1f",
         job_id,

@@ -725,6 +725,72 @@ export interface FlashcardSetItem {
   card_set: StudyCardSetSummary
 }
 
+export interface MindMapNode {
+  id: string
+  label: string
+  group: string
+}
+
+export interface MindMapEdge {
+  source: string
+  target: string
+  label: string
+}
+
+export interface MindMapGraph {
+  nodes: MindMapNode[]
+  edges: MindMapEdge[]
+}
+
+export interface StudyMindMapResponse {
+  id: number
+  job_id: number
+  doc_id: number | null
+  content_hash: string
+  graph: MindMapGraph
+  node_sources: Record<string, string>
+  created_at: string | null
+  cached: boolean
+  task_id: string | null
+}
+
+export interface GenerateStudyMindMapRequest {
+  job_id?: number | null
+  doc_id?: number | null
+}
+
+export interface MindMapJobStartResponse {
+  task_id: string
+  status: string
+}
+
+export interface MindMapJobStatusResponse {
+  task_id: string
+  status: 'pending' | 'processing' | 'done' | 'failed'
+  error?: string | null
+  graph?: MindMapGraph | null
+}
+
+export interface MindMapNodeSource {
+  index: number
+  filename: string
+  snippet: string
+  doc_id: number | null
+  page_number: number | null
+}
+
+export interface MindMapNodeInfoResponse {
+  node_id: string
+  encyclopedic: string
+  interview_prep: string
+  sources: MindMapNodeSource[]
+}
+
+export interface MindMapChatResponse {
+  answer: string
+  sources: MindMapNodeSource[]
+}
+
 export interface StudyCardSetRenameRequest {
   name: string
 }
@@ -903,6 +969,52 @@ export const renameStudyCardSet = async (
 
 export const deleteStudyCardSet = async (cardSetId: number): Promise<void> => {
   await api.delete(`/study/card-sets/${cardSetId}`)
+}
+
+export const generateStudyMindMap = async (request: GenerateStudyMindMapRequest): Promise<StudyMindMapResponse> => {
+  const { data } = await api.post<StudyMindMapResponse>('/study/mindmap', request, { timeout: 120000 })
+  return data
+}
+
+export const getStudyMindMap = async (
+  jobId: number,
+  docId?: number | null,
+): Promise<StudyMindMapResponse> => {
+  const { data } = await api.get<StudyMindMapResponse>('/study/mindmap', {
+    params: { job_id: jobId, doc_id: docId ?? undefined },
+  })
+  return data
+}
+
+export const startMindMapJob = async (request: GenerateStudyMindMapRequest): Promise<MindMapJobStartResponse> => {
+  const { data } = await api.post<MindMapJobStartResponse>('/study/mindmap', request)
+  return data
+}
+
+export const getMindMapJobStatus = async (taskId: string): Promise<MindMapJobStatusResponse> => {
+  const { data } = await api.get<MindMapJobStatusResponse>(`/study/mindmap/status/${encodeURIComponent(taskId)}`)
+  return data
+}
+
+export const getLatestMindMapJob = async (params: { job_id?: number | null; doc_id?: number | null }): Promise<MindMapJobStatusResponse> => {
+  const { data } = await api.get<MindMapJobStatusResponse>('/study/mindmap/latest', { params })
+  return data
+}
+
+export const getMindMapNodeInfo = async (taskId: string, nodeId: string): Promise<MindMapNodeInfoResponse> => {
+  const { data } = await api.get<MindMapNodeInfoResponse>(
+    `/study/mindmap/${encodeURIComponent(taskId)}/node/${encodeURIComponent(nodeId)}`,
+  )
+  return data
+}
+
+export const chatMindMap = async (taskId: string, message: string): Promise<MindMapChatResponse> => {
+  const { data } = await api.post<MindMapChatResponse>(
+    `/study/mindmap/${encodeURIComponent(taskId)}/chat`,
+    { message },
+    { timeout: 60000 },
+  )
+  return data
 }
 
 // ── Practice (Phase 1) ─────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import re
 from typing import Iterable
@@ -72,6 +73,24 @@ def chunk_interview_text_meta(
         chunk_size=max(1, chunk_size),
         overlap=max(0, overlap),
     )
+
+
+def chunk_interview_text_with_pages(
+    text: str,
+    page_start_word_indices: list[int],
+    chunk_size: int = DOC_CHUNK_WORDS,
+    overlap: int = DOC_CHUNK_OVERLAP,
+) -> list[tuple[str, int]]:
+    """Return list of (chunk_text, 1-based page number) using cumulative word offsets."""
+    chunks_with_meta = _word_chunks_with_meta(
+        (text or "").strip(), chunk_size=max(1, chunk_size), overlap=max(0, overlap)
+    )
+    result: list[tuple[str, int]] = []
+    for start_word, _end_word, chunk_text in chunks_with_meta:
+        # bisect_right gives the count of page boundaries at or before start_word → 1-based page
+        page_num = bisect.bisect_right(page_start_word_indices, start_word)
+        result.append((chunk_text, max(1, page_num)))
+    return result
 
 
 def chunk_integrity_stats(

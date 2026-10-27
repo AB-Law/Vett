@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..database import SessionLocal, get_db
 from ..services import flashcards
 from ..services.flashcards import ReviewRating
+from ..services import mindmap
 
 
 router = APIRouter(prefix="/study", tags=["study"])
@@ -106,6 +107,79 @@ class StudyCardSetRenameRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     rating: ReviewRating
+
+
+class MindMapRequest(BaseModel):
+    job_id: int | None = None
+    doc_id: int | None = None
+
+
+class MindMapNodeResponse(BaseModel):
+    id: str
+    label: str
+    group: str
+
+
+class MindMapEdgeResponse(BaseModel):
+    source: str
+    target: str
+    label: str
+
+
+class MindMapGraphResponse(BaseModel):
+    nodes: list[MindMapNodeResponse]
+    edges: list[MindMapEdgeResponse]
+
+
+class MindMapResponse(BaseModel):
+    id: int
+    job_id: int
+    doc_id: int | None = None
+    content_hash: str
+    graph: MindMapGraphResponse
+    node_sources: dict[str, str] = Field(default_factory=dict)
+    created_at: str | None = None
+    cached: bool = False
+    task_id: str | None = None
+
+
+class MindMapJobStartResponse(BaseModel):
+    task_id: str
+    status: str
+
+
+class MindMapJobStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    error: str | None = None
+    graph: MindMapGraphResponse | None = None
+
+
+class MindMapNodeSource(BaseModel):
+    index: int
+    filename: str
+    snippet: str
+    doc_id: int | None = None
+    page_number: int | None = None
+
+
+class MindMapNodeInfoResponse(BaseModel):
+    node_id: str
+    encyclopedic: str
+    interview_prep: str
+    sources: list[MindMapNodeSource] = Field(default_factory=list)
+
+
+class MindMapChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class MindMapChatResponse(BaseModel):
+    answer: str
+    sources: list[MindMapNodeSource] = Field(default_factory=list)
+
+
+_mindmap_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
 
 
 def _now_iso() -> str:
@@ -301,3 +375,108 @@ def review_flashcard(
             raise HTTPException(status_code=404, detail=detail)
         raise HTTPException(status_code=400, detail=detail)
     return FlashcardResponse.model_validate(flashcards.serialize_study_card(card))
+
+
+@router.post("/mindmap", response_model=MindMapJobStartResponse)
+async def start_mindmap_job(
+    payload: MindMapRequest,
+    db: Session = Depends(get_db),
+) -> MindMapJobStartResponse:
+    if payload.job_id is None and payload.doc_id is None:
+        raise HTTPException(status_code=400, detail="Provide a job id, a document, or both.")
+    try:
+        task_id = mindmap.create_mindmap_job(db, job_id=payload.job_id, doc_id=payload.doc_id)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=404 if "not found" in detail.lower() else 400, detail=detail)
+    task = asyncio.create_task(mindmap.run_mindmap_job(task_id, job_id=payload.job_id, doc_id=payload.doc_id))
+    _mindmap_tasks.add(task)
+    task.add_done_callback(_mindmap_tasks.discard)
+    return MindMapJobStartResponse(task_id=task_id, status="pending")
+
+
+@router.get("/mindmap/latest", response_model=MindMapJobStatusResponse)
+def get_latest_mindmap_job(
+    job_id: int | None = Query(default=None, ge=1),
+    doc_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+) -> MindMapJobStatusResponse:
+    result = mindmap.get_latest_mindmap_job(db, job_id=job_id, doc_id=doc_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No completed mind map job found")
+    graph: MindMapGraphResponse | None = None
+    if result.get("graph"):
+        graph = MindMapGraphResponse.model_validate(result["graph"])
+    return MindMapJobStatusResponse(
+        task_id=str(result["task_id"]),
+        status=str(result["status"]),
+        error=result.get("error"),  # type: ignore[arg-type]
+        graph=graph,
+    )
+
+
+@router.get("/mindmap/status/{task_id}", response_model=MindMapJobStatusResponse)
+def get_mindmap_job_status(task_id: str, db: Session = Depends(get_db)) -> MindMapJobStatusResponse:
+    try:
+        result = mindmap.get_mindmap_job_status(db, task_id=task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    graph: MindMapGraphResponse | None = None
+    if result.get("graph"):
+        graph = MindMapGraphResponse.model_validate(result["graph"])
+    return MindMapJobStatusResponse(
+        task_id=str(result["task_id"]),
+        status=str(result["status"]),
+        error=result.get("error"),  # type: ignore[arg-type]
+        graph=graph,
+    )
+
+
+@router.get("/mindmap/{task_id}/node/{node_id}", response_model=MindMapNodeInfoResponse)
+async def get_node_info(task_id: str, node_id: str, db: Session = Depends(get_db)) -> MindMapNodeInfoResponse:
+    try:
+        result = await mindmap.get_or_generate_node_info(db, task_id=task_id, node_id=node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return MindMapNodeInfoResponse(
+        node_id=node_id,
+        encyclopedic=str(result["encyclopedic"]),
+        interview_prep=str(result["interview_prep"]),
+        sources=[MindMapNodeSource.model_validate(s) for s in (result.get("sources") or [])],
+    )
+
+
+@router.post("/mindmap/{task_id}/chat", response_model=MindMapChatResponse)
+async def chat_mindmap(
+    task_id: str,
+    payload: MindMapChatRequest,
+    db: Session = Depends(get_db),
+) -> MindMapChatResponse:
+    try:
+        result = await mindmap.chat_with_mindmap(db, task_id=task_id, message=payload.message)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return MindMapChatResponse(
+        answer=str(result["answer"]),
+        sources=[MindMapNodeSource.model_validate(s) for s in (result.get("sources") or [])],
+    )
+
+
+@router.get("/mindmap", response_model=MindMapResponse)
+def get_mindmap(
+    job_id: int = Query(..., ge=1),
+    doc_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+) -> MindMapResponse:
+    try:
+        result = mindmap.get_cached_mind_map(
+            db,
+            job_id=job_id,
+            doc_id=doc_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
+    return MindMapResponse.model_validate({**result, "cached": True})
